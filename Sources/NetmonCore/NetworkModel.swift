@@ -25,6 +25,11 @@ public struct NetworkSample: Equatable, Sendable {
     }
 
     public static let lost = NetworkSample(rttMilliseconds: nil, outcome: .lost)
+
+    /// On time if the reply beat the next probe; late if it came after, which is when `ping` prints a timeout.
+    public static func classify(milliseconds: Double, interval: TimeInterval) -> NetworkSample {
+        milliseconds <= interval * 1_000 ? .ok(milliseconds) : .late(milliseconds)
+    }
 }
 
 public struct SampleRingBuffer: Sendable {
@@ -45,6 +50,12 @@ public struct SampleRingBuffer: Sendable {
         storage[nextIndex] = sample
         nextIndex = (nextIndex + 1) % capacity
         storedCount = min(storedCount + 1, capacity)
+    }
+
+    /// Corrects an already-appended slot; offset 0 is the newest.
+    public mutating func replace(fromEnd offset: Int, with sample: NetworkSample) {
+        guard offset >= 0, offset < storedCount else { return }
+        storage[(nextIndex - 1 - offset + capacity) % capacity] = sample
     }
 
     public var samples: [NetworkSample] {
@@ -109,6 +120,7 @@ public enum LossRuns {
 public struct WindowStats: Equatable, Sendable {
     public let sampleCount: Int
     public let lossCount: Int
+    public let lateCount: Int
     public let lossPercent: Double
     public let p50Milliseconds: Double?
     public let p90Milliseconds: Double?
@@ -122,6 +134,7 @@ public struct WindowStats: Equatable, Sendable {
         lossCount = samples.reduce(into: 0) { count, sample in
             if sample.outcome == .lost { count += 1 }
         }
+        lateCount = samples.filter { $0.outcome == .late }.count
         lossPercent = samples.isEmpty ? 0 : Double(lossCount) / Double(samples.count) * 100
 
         let latencies = samples.compactMap(\.rttMilliseconds).sorted()
@@ -170,7 +183,6 @@ public struct MonitorState: Equatable, Sendable {
     public let pulseOn: Bool
     public let hasData: Bool
     public let gatewayReachable: Bool?
-    public let bufferbloatDeltaMilliseconds: Double?
 
     public init(
         mode: MonitorMode,
@@ -178,8 +190,7 @@ public struct MonitorState: Equatable, Sendable {
         outageSeconds: Int = 0,
         pulseOn: Bool = false,
         hasData: Bool = true,
-        gatewayReachable: Bool? = nil,
-        bufferbloatDeltaMilliseconds: Double? = nil
+        gatewayReachable: Bool? = nil
     ) {
         self.mode = mode
         self.stats = stats
@@ -187,7 +198,6 @@ public struct MonitorState: Equatable, Sendable {
         self.pulseOn = pulseOn
         self.hasData = hasData
         self.gatewayReachable = gatewayReachable
-        self.bufferbloatDeltaMilliseconds = bufferbloatDeltaMilliseconds
     }
 
     public static let initial = MonitorState(
@@ -195,6 +205,26 @@ public struct MonitorState: Equatable, Sendable {
         stats: WindowStats(samples: []),
         hasData: false
     )
+
+    /// One slot is one second, so the trailing loss run is the outage duration.
+    public static func evaluate(samples: [NetworkSample], gatewayReachable: Bool?, pulseOn: Bool) -> MonitorState {
+        let stats = WindowStats(samples: samples)
+        let mode: MonitorMode
+        if stats.activeLossRun >= 3 {
+            mode = gatewayReachable == true ? .gatewayOnly : .dead
+        } else if stats.p90Milliseconds.map({ $0 > 800 }) == true || stats.lossPercent > 2 {
+            mode = .congested
+        } else {
+            mode = .fine
+        }
+        return MonitorState(
+            mode: mode,
+            stats: stats,
+            outageSeconds: stats.activeLossRun,
+            pulseOn: pulseOn,
+            gatewayReachable: gatewayReachable
+        )
+    }
 
     public var activeLossRun: Int { stats.activeLossRun }
 
@@ -208,130 +238,6 @@ public struct MonitorState: Equatable, Sendable {
 
     public var showsOutageDuration: Bool {
         mode == .dead && outageSeconds >= 5
-    }
-}
-
-public struct ProbeMeasurement: Equatable, Sendable {
-    public let transport: ProbeTransport
-    public let sample: NetworkSample
-
-    public init(transport: ProbeTransport, sample: NetworkSample) {
-        self.transport = transport
-        self.sample = sample
-    }
-
-    public static func classify(transport: ProbeTransport, milliseconds: Double?) -> ProbeMeasurement {
-        let sample: NetworkSample
-        if let milliseconds {
-            sample = milliseconds >= 200 ? .late(milliseconds) : .ok(milliseconds)
-        } else {
-            sample = .lost
-        }
-        return ProbeMeasurement(transport: transport, sample: sample)
-    }
-}
-
-public enum ProbeTransport: String, Sendable {
-    case icmp
-    case tcp
-}
-
-public struct EndpointProbe: Equatable, Sendable {
-    public let address: String
-    public let icmp: ProbeMeasurement
-    public let tcp: ProbeMeasurement
-
-    public init(address: String, icmp: ProbeMeasurement, tcp: ProbeMeasurement) {
-        self.address = address
-        self.icmp = icmp
-        self.tcp = tcp
-    }
-
-    public var reachable: Bool {
-        icmp.sample.outcome != .lost || tcp.sample.outcome != .lost
-    }
-
-    public var displaySample: NetworkSample {
-        let available = [icmp.sample, tcp.sample].filter { $0.outcome != .lost }
-        guard !available.isEmpty else { return .lost }
-        let latency = available.compactMap(\.rttMilliseconds).max() ?? 0
-        let isLate = available.contains { $0.outcome == .late }
-        return isLate ? .late(latency) : .ok(latency)
-    }
-}
-
-public struct ProbeSnapshot: Equatable, Sendable {
-    public let publicEndpoint: EndpointProbe
-    public let gatewayEndpoint: EndpointProbe?
-    public let idleMilliseconds: Double?
-    public let underLoadMilliseconds: Double?
-
-    public init(
-        publicEndpoint: EndpointProbe,
-        gatewayEndpoint: EndpointProbe?,
-        idleMilliseconds: Double? = nil,
-        underLoadMilliseconds: Double? = nil
-    ) {
-        self.publicEndpoint = publicEndpoint
-        self.gatewayEndpoint = gatewayEndpoint
-        self.idleMilliseconds = idleMilliseconds
-        self.underLoadMilliseconds = underLoadMilliseconds
-    }
-
-    public var publicSample: NetworkSample { publicEndpoint.displaySample }
-
-    public var bufferbloatDeltaMilliseconds: Double? {
-        guard let idleMilliseconds, let underLoadMilliseconds else { return nil }
-        return underLoadMilliseconds - idleMilliseconds
-    }
-}
-
-public struct MonitorStateMachine {
-    private var outageStartedAt: Date?
-
-    public init() {}
-
-    public mutating func update(
-        snapshot: ProbeSnapshot,
-        samples: [NetworkSample],
-        now: Date = Date(),
-        pulseOn: Bool
-    ) -> MonitorState {
-        let publicReachable = snapshot.publicEndpoint.reachable
-        let gatewayReachable = snapshot.gatewayEndpoint?.reachable
-
-        let mode: MonitorMode
-        if publicReachable {
-            let stats = WindowStats(samples: samples)
-            mode = (stats.p90Milliseconds.map { $0 > 800 } == true || stats.lossPercent > 2) ? .congested : .fine
-        } else if gatewayReachable == true {
-            mode = .gatewayOnly
-        } else {
-            mode = .dead
-        }
-
-        if publicReachable {
-            outageStartedAt = nil
-        } else if outageStartedAt == nil {
-            outageStartedAt = now
-        }
-
-        let outageSeconds: Int
-        if let outageStartedAt {
-            outageSeconds = max(0, Int(now.timeIntervalSince(outageStartedAt).rounded(.down)))
-        } else {
-            outageSeconds = 0
-        }
-
-        return MonitorState(
-            mode: mode,
-            stats: WindowStats(samples: samples),
-            outageSeconds: outageSeconds,
-            pulseOn: pulseOn,
-            hasData: true,
-            gatewayReachable: gatewayReachable,
-            bufferbloatDeltaMilliseconds: snapshot.bufferbloatDeltaMilliseconds
-        )
     }
 }
 
@@ -370,15 +276,4 @@ public struct RendererPalette {
         )
     }
 
-    public static var fixture: RendererPalette {
-        let ink = NSColor(calibratedWhite: 0.16, alpha: 0.94)
-        return RendererPalette(
-            ink: ink,
-            hairline: NSColor(calibratedWhite: 0.16, alpha: 0.30),
-            rail: ink,
-            amber: NSColor(calibratedRed: 0.82, green: 0.45, blue: 0.03, alpha: 1),
-            red: NSColor(calibratedRed: 0.78, green: 0.08, blue: 0.07, alpha: 1),
-            background: .clear
-        )
-    }
 }

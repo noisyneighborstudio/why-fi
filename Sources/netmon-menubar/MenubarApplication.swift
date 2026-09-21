@@ -9,8 +9,8 @@ final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let statusController = StatusItemController()
         self.statusController = statusController
-        let probes = NetworkProbeCoordinator { [weak statusController] snapshot in
-            statusController?.accept(snapshot)
+        let probes = NetworkProbeCoordinator { [weak statusController] event in
+            statusController?.accept(event)
         }
         self.probes = probes
         probes.start()
@@ -23,83 +23,68 @@ final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
 
 final class StatusItemController: NSObject {
     private let statusItem: NSStatusItem
-    private let stripView: StatusStripView
     private let popover: NSPopover
     private var samples = SampleRingBuffer(capacity: 300)
-    private var stateMachine = MonitorStateMachine()
+    private var latestSequence = 0
+    private var gatewayReachable: Bool?
     private var state = MonitorState.initial
     private var pulseOn = false
-    private var frozenDeadStripSamples: [NetworkSample]?
+    private var probeFailure: String?
 
     override init() {
-        statusItem = NSStatusBar.system.statusItem(withLength: 72)
-        stripView = StatusStripView(frame: CGRect(origin: .zero, size: StripRenderer.statusSize))
+        statusItem = NSStatusBar.system.statusItem(withLength: StripRenderer.statusSize.width)
         popover = NSPopover()
         super.init()
 
-        stripView.onClick = { [weak self] in self?.togglePopover() }
-        stripView.update(samples: [], state: state)
-        statusItem.view = stripView
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePopover)
+        renderStatus(samples: [])
 
         popover.behavior = .transient
         popover.animates = true
         popover.contentViewController = NetworkPopoverViewController()
     }
 
-    func accept(_ snapshot: ProbeSnapshot) {
-        samples.append(snapshot.publicSample)
-        pulseOn.toggle()
-        state = stateMachine.update(
-            snapshot: snapshot,
-            samples: samples.samples,
-            now: Date(),
-            pulseOn: pulseOn
-        )
-        if state.mode != .dead {
-            frozenDeadStripSamples = nil
-        } else if state.showsOutageDuration, frozenDeadStripSamples == nil {
-            frozenDeadStripSamples = Array(samples.samples.suffix(60))
+    func accept(_ event: ProbeEvent) {
+        switch event {
+        case let .closed(sequence, sample, gatewayReachable):
+            samples.append(sample)
+            latestSequence = sequence
+            self.gatewayReachable = gatewayReachable
+            pulseOn.toggle()
+        case let .corrected(sequence, sample):
+            samples.replace(fromEnd: latestSequence - sequence, with: sample)
+        case let .failed(message):
+            probeFailure = message
         }
-        let statusSamples = frozenDeadStripSamples ?? Array(samples.samples.suffix(60))
-        stripView.update(samples: statusSamples, state: state)
-        (popover.contentViewController as? NetworkPopoverViewController)?.update(samples: samples.samples, state: state)
+        let statusSamples = Array(samples.samples.suffix(60))
+        state = MonitorState.evaluate(samples: statusSamples, gatewayReachable: gatewayReachable, pulseOn: pulseOn)
+        renderStatus(samples: statusSamples)
+        (popover.contentViewController as? NetworkPopoverViewController)?.update(samples: samples.samples, state: state, failure: probeFailure)
     }
 
-    private func togglePopover() {
+    private func renderStatus(samples: [NetworkSample]) {
+        guard let button = statusItem.button else { return }
+        // Healthy is a template image so the system owns light/dark, tinting, and highlight.
+        // Colored states resolve against the menubar's own appearance, not the app's.
+        let isTemplate = state.tone == .monochrome
+        let appearance = isTemplate ? NSAppearance(named: .aqua)! : button.effectiveAppearance
+        var image = NSImage(size: StripRenderer.statusSize)
+        appearance.performAsCurrentDrawingAppearance {
+            image = StripRenderer.image(samples: samples, state: state)
+        }
+        image.isTemplate = isTemplate
+        button.image = image
+        button.setAccessibilityLabel(accessibilityDescription(for: state))
+    }
+
+    @objc private func togglePopover() {
         if popover.isShown {
             popover.performClose(nil)
-        } else if let view = statusItem.view {
-            (popover.contentViewController as? NetworkPopoverViewController)?.update(samples: samples.samples, state: state)
-            popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        } else if let button = statusItem.button {
+            (popover.contentViewController as? NetworkPopoverViewController)?.update(samples: samples.samples, state: state, failure: probeFailure)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
-    }
-}
-
-final class StatusStripView: NSView {
-    var onClick: (() -> Void)?
-    private var image = NSImage(size: StripRenderer.statusSize)
-
-    override var intrinsicContentSize: NSSize { StripRenderer.statusSize }
-
-    func update(samples: [NetworkSample], state: MonitorState) {
-        image = StripRenderer.image(
-            samples: samples,
-            state: state,
-            size: StripRenderer.statusSize,
-            windowSeconds: 60,
-            scale: max(window?.backingScaleFactor ?? 2, 2),
-            palette: .menuBar
-        )
-        needsDisplay = true
-        setAccessibilityLabel(accessibilityDescription(for: state))
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
     }
 
     private func accessibilityDescription(for state: MonitorState) -> String {
@@ -159,33 +144,32 @@ final class NetworkPopoverViewController: NSViewController {
         view = root
     }
 
-    func update(samples: [NetworkSample], state: MonitorState) {
+    func update(samples: [NetworkSample], state: MonitorState, failure: String?) {
         guard isViewLoaded else { return }
         stripView.update(samples: samples, state: state)
         guard state.hasData else {
             modeLabel.stringValue = "waiting for first probe"
-            statsLabel.stringValue = "No fallback samples"
-            deltaLabel.stringValue = "Bufferbloat delta: —"
+            statsLabel.stringValue = failure ?? ""
+            deltaLabel.stringValue = ""
             return
         }
 
+        // The popover strip spans 5 minutes, so its numbers do too.
+        let stats = WindowStats(samples: samples)
         modeLabel.stringValue = state.mode.rawValue
-        let p50 = formattedMilliseconds(state.stats.p50Milliseconds)
-        let p95 = formattedMilliseconds(state.stats.p95Milliseconds)
-        let max = formattedMilliseconds(state.stats.maxMilliseconds)
+        let p50 = formattedMilliseconds(stats.p50Milliseconds)
+        let p95 = formattedMilliseconds(stats.p95Milliseconds)
+        let max = formattedMilliseconds(stats.maxMilliseconds)
         statsLabel.stringValue = String(
             format: "loss %5.1f%%   p50 %@   p95 %@   max %@   outage %02ds",
-            state.stats.lossPercent,
+            stats.lossPercent,
             p50,
             p95,
             max,
             state.outageSeconds
         )
-        if let delta = state.bufferbloatDeltaMilliseconds {
-            deltaLabel.stringValue = String(format: "Bufferbloat delta: %+0.1f ms   longest outage: %ds", delta, state.stats.longestLossRun)
-        } else {
-            deltaLabel.stringValue = "Bufferbloat delta: — (no load probe)   longest outage: \(state.stats.longestLossRun)s"
-        }
+        // Late replies are queueing made visible: the in-band bufferbloat signal.
+        deltaLabel.stringValue = failure ?? "late \(stats.lateCount)   longest outage \(stats.longestLossRun)s"
     }
 
     private func formattedMilliseconds(_ value: Double?) -> String {
@@ -195,23 +179,20 @@ final class NetworkPopoverViewController: NSViewController {
 }
 
 final class PopoverStripView: NSView {
-    private var image = NSImage(size: StripRenderer.popoverSize)
+    private var samples: [NetworkSample] = []
+    private var state = MonitorState.initial
 
     override var intrinsicContentSize: NSSize { StripRenderer.popoverSize }
 
     func update(samples: [NetworkSample], state: MonitorState) {
-        image = StripRenderer.image(
-            samples: samples,
-            state: state,
-            size: StripRenderer.popoverSize,
-            windowSeconds: 300,
-            scale: max(window?.backingScaleFactor ?? 2, 2),
-            palette: .menuBar
-        )
+        self.samples = samples
+        self.state = state
         needsDisplay = true
     }
 
+    // Rendered inside draw() so labelColor resolves against this view's appearance.
     override func draw(_ dirtyRect: NSRect) {
-        image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        StripRenderer.image(samples: samples, state: state, size: StripRenderer.popoverSize, windowSeconds: 300)
+            .draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
     }
 }

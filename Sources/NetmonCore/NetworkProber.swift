@@ -1,242 +1,226 @@
 import Foundation
 import Network
 
-public final class NetworkProbeCoordinator {
-    public typealias SnapshotHandler = (ProbeSnapshot) -> Void
+public enum ProbeEvent: Sendable {
+    /// A slot closed one interval after it was sent: on time, or provisionally lost.
+    case closed(sequence: Int, sample: NetworkSample, gatewayReachable: Bool?)
+    /// A reply arrived after its slot closed — the case where `ping` prints a timeout, then the reply.
+    case corrected(sequence: Int, sample: NetworkSample)
+    case failed(String)
+}
 
-    private let probeQueue = DispatchQueue(label: "netmon-menubar.probes", qos: .utility)
-    private let callbackQueue = DispatchQueue(label: "netmon-menubar.probe-callbacks", qos: .utility)
+/// Sends one probe slot per interval to a public IP over ICMP and TCP, plus ICMP to the gateway.
+/// Everything runs on one serial queue, and nothing on it blocks, so slots never compress.
+public final class NetworkProbeCoordinator {
+    public typealias EventHandler = (ProbeEvent) -> Void
+
+    /// Replies later than this many slots are no longer matched to their slot.
+    private static let graceSlots = 10
+
+    private let queue = DispatchQueue(label: "netmon-menubar.probes", qos: .utility)
     private let publicAddress: String
-    private let publicPort: UInt16
+    private let publicPort: NWEndpoint.Port
     private let interval: TimeInterval
-    private let handler: SnapshotHandler
+    private let handler: EventHandler
     private var timer: DispatchSourceTimer?
-    private var isStopped = false
-    private var tickCount = 0
-    private var lastIdleMilliseconds: Double?
-    private var lastUnderLoadMilliseconds: Double?
+    private var echo: ICMPEchoSocket?
+    private var activity: NSObjectProtocol?
+    private var nextSequence = 0
+    private var slots: [Int: Slot] = [:]
+    private var gatewayAddress: String?
+    private var lastGatewayReply: Int?
+
+    private struct Slot {
+        let sentAt: UInt64
+        var sample: NetworkSample?
+        var isClosed = false
+        var connection: NWConnection?
+    }
 
     public init(
         publicAddress: String = "1.1.1.1",
         publicPort: UInt16 = 443,
         interval: TimeInterval = 1,
-        handler: @escaping SnapshotHandler
+        handler: @escaping EventHandler
     ) {
         self.publicAddress = publicAddress
-        self.publicPort = publicPort
+        self.publicPort = NWEndpoint.Port(rawValue: publicPort) ?? .https
         self.interval = interval
         self.handler = handler
     }
 
-    deinit {
-        stop()
-    }
-
     public func start() {
-        probeQueue.async { [weak self] in
-            guard let self, self.timer == nil else { return }
-            self.isStopped = false
-            let timer = DispatchSource.makeTimerSource(queue: self.probeQueue)
-            timer.schedule(deadline: .now(), repeating: self.interval, leeway: .milliseconds(100))
-            timer.setEventHandler { [weak self] in
-                self?.probeTick()
+        queue.async { [self] in
+            guard timer == nil else { return }
+            // App Nap would coalesce the timer and silently stretch the strip's time axis.
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Per-second network probes"
+            )
+            do {
+                echo = try ICMPEchoSocket(queue: queue) { [weak self] address, sequence in
+                    self?.receiveEcho(from: address, sequence: sequence)
+                }
+            } catch {
+                emit(.failed("ICMP unavailable: \(error)"))
             }
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(10))
+            timer.setEventHandler { [weak self] in self?.tick() }
             self.timer = timer
             timer.resume()
         }
     }
 
     public func stop() {
-        probeQueue.async { [weak self] in
-            guard let self else { return }
-            self.isStopped = true
-            self.timer?.setEventHandler {}
-            self.timer?.cancel()
-            self.timer = nil
+        queue.sync {
+            timer?.cancel()
+            timer = nil
+            echo?.close()
+            echo = nil
+            slots.values.forEach { $0.connection?.cancel() }
+            slots.removeAll()
+            if let activity { ProcessInfo.processInfo.endActivity(activity) }
+            activity = nil
         }
     }
 
-    private func probeTick() {
-        guard !isStopped else { return }
-        let gatewayAddress = DefaultGatewayResolver.resolve()
-        let shouldMeasureLoad = tickCount % 30 == 0
-        let group = DispatchGroup()
-        let lock = NSLock()
-        var publicEndpoint: EndpointProbe?
-        var gatewayEndpoint: EndpointProbe?
-
-        group.enter()
-        DispatchQueue.global(qos: .utility).async { [self] in
-            let endpoint = Self.probeEndpoint(address: publicAddress, port: publicPort, callbackQueue: callbackQueue)
-            lock.lock()
-            publicEndpoint = endpoint
-            lock.unlock()
-            group.leave()
+    private func tick() {
+        closeSlot(nextSequence - 1)
+        for sequence in slots.keys.filter({ $0 < nextSequence - Self.graceSlots }) {
+            slots.removeValue(forKey: sequence)?.connection?.cancel()
         }
+        if nextSequence % 30 == 0 {
+            gatewayAddress = DefaultGatewayResolver.resolve()
+        }
+        sendSlot(nextSequence)
+        nextSequence += 1
+    }
 
+    private func sendSlot(_ sequence: Int) {
+        var slot = Slot(sentAt: DispatchTime.now().uptimeNanoseconds)
+        let icmpSequence = UInt16(truncatingIfNeeded: sequence)
+        echo?.send(to: publicAddress, sequence: icmpSequence)
         if let gatewayAddress {
-            group.enter()
-            DispatchQueue.global(qos: .utility).async { [self] in
-                let endpoint = Self.probeEndpoint(address: gatewayAddress, port: publicPort, callbackQueue: callbackQueue)
-                lock.lock()
-                gatewayEndpoint = endpoint
-                lock.unlock()
-                group.leave()
-            }
+            echo?.send(to: gatewayAddress, sequence: icmpSequence)
         }
 
-        _ = group.wait(timeout: .now() + 3.5)
-        guard let publicEndpoint else { return }
-        if shouldMeasureLoad {
-            lastIdleMilliseconds = publicEndpoint.displaySample.rttMilliseconds
-            lastUnderLoadMilliseconds = BufferbloatProbe.measure(
-                address: publicAddress,
-                port: publicPort,
-                callbackQueue: callbackQueue
-            )
+        // TCP rides alongside ICMP so an AP that deprioritizes ping doesn't read as loss.
+        let connection = NWConnection(host: NWEndpoint.Host(publicAddress), port: publicPort, using: .tcp)
+        connection.stateUpdateHandler = { [weak self] state in
+            guard case .ready = state else { return }
+            self?.receiveReply(for: sequence)
         }
-        tickCount += 1
-        let snapshot = ProbeSnapshot(
-            publicEndpoint: publicEndpoint,
-            gatewayEndpoint: gatewayEndpoint,
-            idleMilliseconds: lastIdleMilliseconds,
-            underLoadMilliseconds: lastUnderLoadMilliseconds
-        )
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.isStopped else { return }
-            self.handler(snapshot)
+        connection.start(queue: queue)
+        slot.connection = connection
+        slots[sequence] = slot
+    }
+
+    private func receiveEcho(from address: String, sequence icmpSequence: UInt16) {
+        guard let sequence = slots.keys.first(where: { UInt16(truncatingIfNeeded: $0) == icmpSequence }) else { return }
+        if address == publicAddress {
+            receiveReply(for: sequence)
+        } else if address == gatewayAddress {
+            lastGatewayReply = max(lastGatewayReply ?? sequence, sequence)
         }
     }
 
-    private static func probeEndpoint(address: String, port: UInt16, callbackQueue: DispatchQueue) -> EndpointProbe {
-        let icmp = ICMPProbe.measure(address: address)
-        let tcp = TCPProbe.measure(address: address, port: port, callbackQueue: callbackQueue)
-        return EndpointProbe(address: address, icmp: icmp, tcp: tcp)
+    private func receiveReply(for sequence: Int) {
+        guard var slot = slots[sequence], slot.sample == nil else { return }
+        let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - slot.sentAt) / 1_000_000
+        let sample = NetworkSample.classify(milliseconds: milliseconds, interval: interval)
+        slot.sample = sample
+        slot.connection?.cancel()
+        slot.connection = nil
+        slots[sequence] = slot
+        if slot.isClosed {
+            emit(.corrected(sequence: sequence, sample: sample))
+        }
+    }
+
+    private func closeSlot(_ sequence: Int) {
+        guard var slot = slots[sequence] else { return }
+        slot.isClosed = true
+        slots[sequence] = slot
+        let gatewayReachable = gatewayAddress.map { _ in (lastGatewayReply ?? .min) >= sequence - 2 }
+        emit(.closed(sequence: sequence, sample: slot.sample ?? .lost, gatewayReachable: gatewayReachable))
+    }
+
+    private func emit(_ event: ProbeEvent) {
+        let handler = self.handler
+        DispatchQueue.main.async { handler(event) }
     }
 }
 
-private enum BufferbloatProbe {
-    static func measure(address: String, port: UInt16, callbackQueue: DispatchQueue) -> Double? {
-        guard let endpointPort = NWEndpoint.Port(rawValue: port) else { return nil }
-        let connections = (0..<4).map { _ in
-            NWConnection(host: NWEndpoint.Host(address), port: endpointPort, using: .tcp)
-        }
-        let eventSemaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var signalled = Array(repeating: false, count: connections.count)
-        let payload = Data(repeating: 0, count: 16 * 1024)
+/// Unprivileged ICMP echo over SOCK_DGRAM. Replies arrive with their IPv4 header attached.
+private final class ICMPEchoSocket {
+    enum SocketError: Error {
+        case open(errno: Int32)
+    }
 
-        for (index, connection) in connections.enumerated() {
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    connection.send(content: payload, completion: .contentProcessed { _ in })
-                    lock.lock()
-                    let shouldSignal = !signalled[index]
-                    signalled[index] = true
-                    lock.unlock()
-                    if shouldSignal { eventSemaphore.signal() }
-                case .failed, .cancelled:
-                    lock.lock()
-                    let shouldSignal = !signalled[index]
-                    signalled[index] = true
-                    lock.unlock()
-                    if shouldSignal { eventSemaphore.signal() }
-                default:
-                    break
+    private let descriptor: Int32
+    private let identifier = UInt16(truncatingIfNeeded: getpid())
+    private let readSource: DispatchSourceRead
+
+    init(queue: DispatchQueue, onReply: @escaping (_ address: String, _ sequence: UInt16) -> Void) throws {
+        let descriptor = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
+        guard descriptor >= 0 else { throw SocketError.open(errno: errno) }
+        self.descriptor = descriptor
+        readSource = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
+
+        let identifier = self.identifier
+        readSource.setEventHandler {
+            var buffer = [UInt8](repeating: 0, count: 1_500)
+            var source = sockaddr_in()
+            var sourceLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let count = withUnsafeMutablePointer(to: &source) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    recvfrom(descriptor, &buffer, buffer.count, 0, $0, &sourceLength)
                 }
             }
-            connection.start(queue: callbackQueue)
+            let header = buffer[0] >> 4 == 4 ? Int(buffer[0] & 0x0f) * 4 : 0
+            guard count >= header + 8,
+                  buffer[header] == 0,
+                  UInt16(buffer[header + 4]) << 8 | UInt16(buffer[header + 5]) == identifier else { return }
+            let sequence = UInt16(buffer[header + 6]) << 8 | UInt16(buffer[header + 7])
+            onReply(String(cString: inet_ntoa(source.sin_addr)), sequence)
         }
-
-        for _ in connections {
-            _ = eventSemaphore.wait(timeout: .now() + 1)
-        }
-        let loadedMeasurement = ICMPProbe.measure(address: address).sample.rttMilliseconds
-        connections.forEach { $0.cancel() }
-        return loadedMeasurement
-    }
-}
-
-private enum ICMPProbe {
-    static func measure(address: String) -> ProbeMeasurement {
-        let executable = URL(fileURLWithPath: "/sbin/ping")
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["-n", "-c", "1", "-W", "2000", address]
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return ProbeMeasurement.classify(transport: .icmp, milliseconds: nil)
-        }
-
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        guard let milliseconds = parseMilliseconds(from: output), process.terminationStatus == 0 else {
-            return ProbeMeasurement.classify(transport: .icmp, milliseconds: nil)
-        }
-        return ProbeMeasurement.classify(transport: .icmp, milliseconds: milliseconds)
+        readSource.setCancelHandler { Darwin.close(descriptor) }
+        readSource.resume()
     }
 
-    private static func parseMilliseconds(from output: String) -> Double? {
-        let pattern = #"time[=<]([0-9]+(?:\.[0-9]+)?)\s*ms"#
-        guard let expression = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(output.startIndex..<output.endIndex, in: output)
-        guard let match = expression.firstMatch(in: output, range: range), match.numberOfRanges > 1,
-              let valueRange = Range(match.range(at: 1), in: output) else { return nil }
-        return Double(output[valueRange])
-    }
-}
+    func send(to address: String, sequence: UInt16) {
+        var destination = sockaddr_in()
+        destination.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        destination.sin_family = sa_family_t(AF_INET)
+        guard inet_pton(AF_INET, address, &destination.sin_addr) == 1 else { return }
 
-private enum TCPProbe {
-    static func measure(address: String, port: UInt16, callbackQueue: DispatchQueue) -> ProbeMeasurement {
-        guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            return ProbeMeasurement.classify(transport: .tcp, milliseconds: nil)
-        }
-
-        let connection = NWConnection(host: NWEndpoint.Host(address), port: endpointPort, using: .tcp)
-        let semaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var completed = false
-        var elapsedMilliseconds: Double?
-        let started = DispatchTime.now().uptimeNanoseconds
-
-        func finish(_ result: Double?) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !completed else { return }
-            completed = true
-            elapsedMilliseconds = result
-            semaphore.signal()
-        }
-
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-                finish(elapsed)
-                connection.cancel()
-            case .failed, .cancelled:
-                finish(nil)
-            default:
-                break
+        var packet: [UInt8] = [8, 0, 0, 0, UInt8(identifier >> 8), UInt8(identifier & 0xff), UInt8(sequence >> 8), UInt8(sequence & 0xff)]
+        packet += [UInt8](repeating: 0, count: 16)
+        let checksum = Self.checksum(packet)
+        packet[2] = UInt8(checksum >> 8)
+        packet[3] = UInt8(checksum & 0xff)
+        // A failed send (no route) is loss, and the slot records it as such.
+        _ = withUnsafePointer(to: &destination) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                sendto(descriptor, packet, packet.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        connection.start(queue: callbackQueue)
-        if semaphore.wait(timeout: .now() + 2) == .timedOut {
-            connection.cancel()
-            finish(nil)
-        }
+    }
 
-        lock.lock()
-        let result = elapsedMilliseconds
-        lock.unlock()
-        return ProbeMeasurement.classify(transport: .tcp, milliseconds: result)
+    func close() {
+        readSource.cancel()
+    }
+
+    private static func checksum(_ bytes: [UInt8]) -> UInt16 {
+        var sum: UInt32 = 0
+        for index in stride(from: 0, to: bytes.count, by: 2) {
+            sum += UInt32(bytes[index]) << 8 | UInt32(index + 1 < bytes.count ? bytes[index + 1] : 0)
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16)
+        }
+        return ~UInt16(sum)
     }
 }
 
@@ -260,7 +244,7 @@ private enum DefaultGatewayResolver {
         guard let output = String(data: data, encoding: .utf8) else { return nil }
         for line in output.split(whereSeparator: \.isNewline) {
             let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
-            guard parts.count >= 2, parts[0] == "gateway" else { continue }
+            guard parts.count >= 2, parts[0] == "gateway:" else { continue }
             let address = String(parts[1])
             guard IPv4AddressValidator.isLiteral(address) else { return nil }
             return address

@@ -14,18 +14,21 @@ struct FixtureRequest {
         case missingFixture
         case missingOutput
         case unknownFixture(String)
+        case unknownAppearance(String)
 
         var description: String {
             switch self {
             case .missingFixture: return "expected --render-fixture <fine|congested|dead|gateway-only>"
             case .missingOutput: return "expected --out <file.png>"
             case .unknownFixture(let value): return "unknown fixture \(value)"
+            case .unknownAppearance(let value): return "unknown appearance \(value); expected light or dark"
             }
         }
     }
 
     let fixture: Fixture
     let outputURL: URL
+    let appearance: NSAppearance
 
     init(arguments: [String]) throws {
         guard let fixtureIndex = arguments.firstIndex(of: "--render-fixture"), fixtureIndex + 1 < arguments.count else {
@@ -38,6 +41,12 @@ struct FixtureRequest {
         guard let outputIndex = arguments.firstIndex(of: "--out"), outputIndex + 1 < arguments.count else {
             throw RequestError.missingOutput
         }
+        let appearanceValue = arguments.firstIndex(of: "--appearance").flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil } ?? "light"
+        switch appearanceValue {
+        case "light": appearance = NSAppearance(named: .aqua)!
+        case "dark": appearance = NSAppearance(named: .darkAqua)!
+        default: throw RequestError.unknownAppearance(appearanceValue)
+        }
         self.fixture = fixture
         self.outputURL = URL(fileURLWithPath: arguments[outputIndex + 1], isDirectory: false)
     }
@@ -45,15 +54,16 @@ struct FixtureRequest {
     func render() throws {
         let samples = FixtureSamples.samples(for: fixture)
         let state = FixtureSamples.state(for: fixture, samples: samples)
-        try StripRenderer.writePNG(
-            samples: samples,
-            state: state,
-            to: outputURL,
-            size: StripRenderer.statusSize,
-            windowSeconds: 60,
-            scale: 2,
-            palette: .fixture
-        )
+        // Same palette as the live status item, resolved against a named appearance.
+        var renderError: Error?
+        appearance.performAsCurrentDrawingAppearance {
+            do {
+                try StripRenderer.writePNG(samples: samples, state: state, to: outputURL)
+            } catch {
+                renderError = error
+            }
+        }
+        if let renderError { throw renderError }
     }
 }
 
