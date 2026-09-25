@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 
 public enum SampleOutcome: String, CaseIterable, Codable, Sendable {
@@ -7,29 +6,46 @@ public enum SampleOutcome: String, CaseIterable, Codable, Sendable {
     case lost
 }
 
+/// One probe slot: the internet reply, and the gateway reply sent in the same slot.
 public struct NetworkSample: Equatable, Sendable {
     public let rttMilliseconds: Double?
     public let outcome: SampleOutcome
+    public let gatewayMilliseconds: Double?
 
-    public init(rttMilliseconds: Double?, outcome: SampleOutcome) {
+    public init(rttMilliseconds: Double?, outcome: SampleOutcome, gatewayMilliseconds: Double? = nil) {
         self.rttMilliseconds = rttMilliseconds
         self.outcome = outcome
+        self.gatewayMilliseconds = gatewayMilliseconds
     }
 
-    public static func ok(_ milliseconds: Double) -> NetworkSample {
-        NetworkSample(rttMilliseconds: milliseconds, outcome: .ok)
+    public static func ok(_ milliseconds: Double, gateway: Double? = nil) -> NetworkSample {
+        NetworkSample(rttMilliseconds: milliseconds, outcome: .ok, gatewayMilliseconds: gateway)
     }
 
-    public static func late(_ milliseconds: Double) -> NetworkSample {
-        NetworkSample(rttMilliseconds: milliseconds, outcome: .late)
+    public static func late(_ milliseconds: Double, gateway: Double? = nil) -> NetworkSample {
+        NetworkSample(rttMilliseconds: milliseconds, outcome: .late, gatewayMilliseconds: gateway)
     }
 
-    public static let lost = NetworkSample(rttMilliseconds: nil, outcome: .lost)
+    public static func lost(gateway: Double? = nil) -> NetworkSample {
+        NetworkSample(rttMilliseconds: nil, outcome: .lost, gatewayMilliseconds: gateway)
+    }
+
+    public static let lost = lost()
 
     /// On time if the reply beat the next probe; late if it came after, which is when `ping` prints a timeout.
-    public static func classify(milliseconds: Double, interval: TimeInterval) -> NetworkSample {
-        milliseconds <= interval * 1_000 ? .ok(milliseconds) : .late(milliseconds)
+    public static func classify(milliseconds: Double?, interval: TimeInterval, gateway: Double? = nil) -> NetworkSample {
+        guard let milliseconds else { return .lost(gateway: gateway) }
+        return milliseconds <= interval * 1_000 ? .ok(milliseconds, gateway: gateway) : .late(milliseconds, gateway: gateway)
     }
+}
+
+public enum Thresholds {
+    /// Late: the reply took longer than the one-second probe interval.
+    public static let lateMilliseconds: Double = 1_000
+    /// Upper edge of a healthy internet round trip; drives the green band and orange stats.
+    public static let normalMilliseconds: Double = 150
+    /// A loss run this long is an outage.
+    public static let outageSeconds = 3
 }
 
 public struct SampleRingBuffer: Sendable {
@@ -67,20 +83,18 @@ public struct SampleRingBuffer: Sendable {
     }
 }
 
+/// Menu bar bar height: log from 2 ms to the late threshold fills the lower 8pt,
+/// late to 3 s fills the top 6pt, so the threshold hairline sits at a fixed height.
 public enum RTTScale {
-    public static let floorMilliseconds: Double = 10
-    public static let ceilingMilliseconds: Double = 3_000
+    public static let height: CGFloat = 14
+    public static let thresholdHeight: CGFloat = 8
 
-    public static func normalized(milliseconds: Double) -> Double {
-        let clamped = min(max(milliseconds, floorMilliseconds), ceilingMilliseconds)
-        let numerator = log10(clamped / floorMilliseconds)
-        let denominator = log10(ceilingMilliseconds / floorMilliseconds)
-        return min(max(numerator / denominator, 0), 1)
-    }
-
-    public static func barHeight(milliseconds: Double, maxHeight: Int) -> Int {
-        guard maxHeight > 0 else { return 0 }
-        return Int((normalized(milliseconds: milliseconds) * Double(maxHeight)).rounded())
+    public static func barHeight(milliseconds: Double) -> CGFloat {
+        let late = Thresholds.lateMilliseconds
+        let raw = milliseconds <= late
+            ? log10(max(milliseconds, 2) / 2) / log10(late / 2) * Double(thresholdHeight)
+            : Double(thresholdHeight) + log10(min(milliseconds, 3_000) / late) / log10(3) * Double(height - thresholdHeight)
+        return max(1, (CGFloat(raw) * 2).rounded() / 2)
     }
 }
 
@@ -100,7 +114,6 @@ public enum LossRuns {
     public static func contiguous(in samples: [NetworkSample]) -> [LossRun] {
         var runs: [LossRun] = []
         var start: Int?
-
         for (index, sample) in samples.enumerated() {
             if sample.outcome == .lost {
                 if start == nil { start = index }
@@ -109,57 +122,50 @@ public enum LossRuns {
                 start = nil
             }
         }
-
         if let start {
             runs.append(LossRun(start: start, end: samples.count))
         }
         return runs
+    }
+
+    /// Indices of lost samples that belong to a run long enough to be an outage.
+    public static func outageIndices(in samples: [NetworkSample]) -> Set<Int> {
+        Set(contiguous(in: samples).filter { $0.length >= Thresholds.outageSeconds }.flatMap { $0.start..<$0.end })
     }
 }
 
 public struct WindowStats: Equatable, Sendable {
     public let sampleCount: Int
     public let lossCount: Int
-    public let lateCount: Int
     public let lossPercent: Double
     public let p50Milliseconds: Double?
     public let p90Milliseconds: Double?
     public let p95Milliseconds: Double?
-    public let maxMilliseconds: Double?
+    public let gatewayP50Milliseconds: Double?
     public let longestLossRun: Int
     public let activeLossRun: Int
 
     public init(samples: [NetworkSample]) {
         sampleCount = samples.count
-        lossCount = samples.reduce(into: 0) { count, sample in
-            if sample.outcome == .lost { count += 1 }
-        }
-        lateCount = samples.filter { $0.outcome == .late }.count
+        lossCount = samples.filter { $0.outcome == .lost }.count
         lossPercent = samples.isEmpty ? 0 : Double(lossCount) / Double(samples.count) * 100
 
         let latencies = samples.compactMap(\.rttMilliseconds).sorted()
-        p50Milliseconds = Self.percentile(latencies, percentile: 0.50)
-        p90Milliseconds = Self.percentile(latencies, percentile: 0.90)
-        p95Milliseconds = Self.percentile(latencies, percentile: 0.95)
-        maxMilliseconds = latencies.last
+        p50Milliseconds = Self.percentile(latencies, 0.50)
+        p90Milliseconds = Self.percentile(latencies, 0.90)
+        p95Milliseconds = Self.percentile(latencies, 0.95)
+        gatewayP50Milliseconds = Self.percentile(samples.compactMap(\.gatewayMilliseconds).sorted(), 0.50)
 
         longestLossRun = LossRuns.contiguous(in: samples).map(\.length).max() ?? 0
-        var active = 0
-        for sample in samples.reversed() {
-            guard sample.outcome == .lost else { break }
-            active += 1
-        }
-        activeLossRun = active
+        activeLossRun = samples.reversed().prefix { $0.outcome == .lost }.count
     }
 
-    private static func percentile(_ sorted: [Double], percentile: Double) -> Double? {
+    private static func percentile(_ sorted: [Double], _ percentile: Double) -> Double? {
         guard !sorted.isEmpty else { return nil }
         let position = percentile * Double(sorted.count - 1)
         let lower = Int(position.rounded(.down))
         let upper = Int(position.rounded(.up))
-        if lower == upper { return sorted[lower] }
-        let fraction = position - Double(lower)
-        return sorted[lower] + (sorted[upper] - sorted[lower]) * fraction
+        return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - Double(lower))
     }
 }
 
@@ -173,80 +179,53 @@ public enum MonitorMode: String, CaseIterable, Sendable {
 public struct MonitorState: Equatable, Sendable {
     public let mode: MonitorMode
     public let stats: WindowStats
-    public let outageSeconds: Int
-    public let pulseOn: Bool
     public let hasData: Bool
-    public let gatewayReachable: Bool?
 
-    public init(
-        mode: MonitorMode,
-        stats: WindowStats,
-        outageSeconds: Int = 0,
-        pulseOn: Bool = false,
-        hasData: Bool = true,
-        gatewayReachable: Bool? = nil
-    ) {
+    public init(mode: MonitorMode, stats: WindowStats, hasData: Bool = true) {
         self.mode = mode
         self.stats = stats
-        self.outageSeconds = outageSeconds
-        self.pulseOn = pulseOn
         self.hasData = hasData
-        self.gatewayReachable = gatewayReachable
     }
 
-    public static let initial = MonitorState(
-        mode: .fine,
-        stats: WindowStats(samples: []),
-        hasData: false
-    )
+    public static let initial = MonitorState(mode: .fine, stats: WindowStats(samples: []), hasData: false)
 
     /// One slot is one second, so the trailing loss run is the outage duration.
-    public static func evaluate(samples: [NetworkSample], gatewayReachable: Bool?, pulseOn: Bool) -> MonitorState {
+    public static func evaluate(samples: [NetworkSample], gatewayReachable: Bool?) -> MonitorState {
         let stats = WindowStats(samples: samples)
         let mode: MonitorMode
-        if stats.activeLossRun >= 3 {
+        if stats.activeLossRun >= Thresholds.outageSeconds {
             mode = gatewayReachable == true ? .gatewayOnly : .dead
-        } else if stats.p90Milliseconds.map({ $0 > 800 }) == true || stats.lossPercent > 2 {
+        } else if stats.p50Milliseconds.map({ $0 > Thresholds.normalMilliseconds }) == true
+            || stats.p90Milliseconds.map({ $0 > 800 }) == true
+            || stats.lossPercent > 2 {
             mode = .congested
         } else {
             mode = .fine
         }
-        return MonitorState(
-            mode: mode,
-            stats: stats,
-            outageSeconds: stats.activeLossRun,
-            pulseOn: pulseOn,
-            gatewayReachable: gatewayReachable
-        )
+        return MonitorState(mode: mode, stats: stats, hasData: !samples.isEmpty)
     }
 
-    public var activeLossRun: Int { stats.activeLossRun }
+    public var outageSeconds: Int { stats.activeLossRun }
+}
 
-    public var showsOutageDuration: Bool {
-        mode == .dead && outageSeconds >= 5
+public enum DisplayMode: String, CaseIterable, Sendable {
+    case auto
+    case compact
+    case expanded
+
+    /// Auto stays icon-only while fine and widens for every other state.
+    public func isExpanded(for mode: MonitorMode) -> Bool {
+        self == .expanded || (self == .auto && mode != .fine)
     }
 }
 
-public struct RendererPalette {
-    public let ink: NSColor
-    public let amber: NSColor
-    public let red: NSColor
-    public let background: NSColor
-
-    public init(ink: NSColor, amber: NSColor, red: NSColor, background: NSColor = .clear) {
-        self.ink = ink
-        self.amber = amber
-        self.red = red
-        self.background = background
+public enum Formatting {
+    public static func milliseconds(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return value < 1_000 ? "\(Int(value.rounded()))ms" : String(format: "%.1fs", value / 1_000)
     }
 
-    public static var menuBar: RendererPalette {
-        // systemOrange washes out on bright wallpaper behind a light menubar.
-        let amber = NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                ? .systemOrange
-                : NSColor(srgbRed: 0.85, green: 0.4, blue: 0, alpha: 1)
-        }
-        return RendererPalette(ink: .labelColor, amber: amber, red: .systemRed)
+    public static func duration(_ seconds: Int) -> String {
+        String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }
