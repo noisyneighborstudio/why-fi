@@ -30,10 +30,16 @@ public enum StatusRenderer {
     static let baseline: CGFloat = 18
     static let labelFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
 
-    public static func image(samples: [NetworkSample], state: MonitorState, expanded: Bool, dark: Bool, scale: CGFloat = 2) -> NSImage {
+    /// `reveal` runs from 0 (icon only) to 1 (graph and label); in between, the item is
+    /// partway wide, the graph and label fade in as they are uncovered, and the glyph crossfades.
+    public static func image(samples: [NetworkSample], state: MonitorState, reveal: CGFloat, dark: Bool, scale: CGFloat = 2) -> NSImage {
         let palette = StatusPalette(dark: dark)
-        let label = expanded ? labelText(state: state, palette: palette) : nil
-        let size = CGSize(width: width(label: label), height: height)
+        let reveal = min(max(reveal, 0), 1)
+        let label = labelText(state: state, palette: palette)
+        let compact = padding + glyphWidth + padding
+        // Whole pixels keep every frame crisp.
+        let width = ((compact + (expandedWidth(label: label) - compact) * reveal) * scale).rounded() / scale
+        let size = CGSize(width: width, height: height)
         guard let bitmap = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -50,8 +56,23 @@ public enum StatusRenderer {
         context.scaleBy(x: 1, y: -1)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
-        drawGlyph(in: context, state: state, expanded: expanded, palette: palette)
-        if let label {
+        // Transparency layers keep each layer's knockouts from clearing the other.
+        func layer(_ alpha: CGFloat, _ draw: () -> Void) {
+            guard alpha > 0 else { return }
+            context.saveGState()
+            context.setAlpha(alpha)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            draw()
+            context.endTransparencyLayer()
+            context.restoreGState()
+        }
+        layer(1 - reveal) { drawGlyph(in: context, state: state, expanded: false, palette: palette) }
+        layer(reveal) {
+            drawGlyph(in: context, state: state, expanded: true, palette: palette)
+            // Graph and label ride the right edge, so the label and newest bars show first
+            // and older history slides out from behind the glyph.
+            context.clip(to: CGRect(x: sparklineX, y: 0, width: max(0, width - sparklineX), height: height))
+            context.translateBy(x: width - expandedWidth(label: label), y: 0)
             drawSparkline(in: context, samples: Array(samples.suffix(columns)), palette: palette)
             let labelSize = label.size()
             label.draw(at: CGPoint(x: sparklineX + sparklineWidth + gap, y: ((height - labelSize.height) / 2).rounded()))
@@ -77,8 +98,7 @@ public enum StatusRenderer {
         }
     }
 
-    private static func width(label: NSAttributedString?) -> CGFloat {
-        guard let label else { return padding + glyphWidth + padding }
+    private static func expandedWidth(label: NSAttributedString) -> CGFloat {
         // Reserve five digits so the item doesn't shift as the number changes.
         let field = max(label.size().width, NSAttributedString(string: "00000", attributes: [.font: labelFont]).size().width)
         return (sparklineX + sparklineWidth + gap + field + padding).rounded(.up)

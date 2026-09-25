@@ -48,7 +48,7 @@ struct FixtureRequest {
     func render() throws {
         let samples = Self.samples(for: fixture)
         let state = MonitorState.evaluate(samples: samples, gatewayReachable: fixture == .gatewayOnly)
-        let image = StatusRenderer.image(samples: samples, state: state, expanded: displayMode.isExpanded(for: state.mode), dark: dark)
+        let image = StatusRenderer.image(samples: samples, state: state, reveal: displayMode.isExpanded(for: state.mode) ? 1 : 0, dark: dark)
         guard let bitmap = image.representations.first as? NSBitmapImageRep,
               let data = bitmap.representation(using: .png, properties: [:]) else {
             throw RequestError.invalid("render", fixture.rawValue)

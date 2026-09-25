@@ -91,6 +91,36 @@ final class NetmonCoreTests: XCTestCase {
         XCTAssertTrue(Verdict.text(state: state, stats: WindowStats(samples: local)).hasSuffix("The link to your router is slow."))
     }
 
+    func testSpringSettlesWithoutOvershootAndReversesWithoutAJump() {
+        var full = CriticalSpring(value: 0)
+        var peak = 0.0
+        for _ in 0..<120 {
+            full.advance(toward: 1, by: 1.0 / 120)
+            peak = max(peak, full.value)
+        }
+        XCTAssertLessThanOrEqual(peak, 1)
+        XCTAssertEqual(full.value, 1)
+
+        // Interrupted 0.1s in, while moving fast: reversing keeps position and outbound velocity.
+        var spring = CriticalSpring(value: 0)
+        for _ in 0..<12 { spring.advance(toward: 1, by: 1.0 / 120) }
+        let before = spring.value
+        spring.advance(toward: 0, by: 1.0 / 120)
+        XCTAssertGreaterThan(spring.value, before)
+        for _ in 0..<120 { spring.advance(toward: 0, by: 1.0 / 120) }
+        XCTAssertEqual(spring.value, 0)
+    }
+
+    func testRevealWidensTheItemBetweenIconAndGraph() throws {
+        let samples = Array(repeating: NetworkSample.ok(18), count: 30)
+        let state = MonitorState.evaluate(samples: samples, gatewayReachable: false)
+        let widths = [0, 0.5, 1].map { StatusRenderer.image(samples: samples, state: state, reveal: $0, dark: false).size.width }
+        XCTAssertEqual(widths[0], 30)
+        XCTAssertGreaterThan(widths[1], widths[0])
+        XCTAssertGreaterThan(widths[2], widths[1])
+        XCTAssertEqual(widths[1] * 2, (widths[1] * 2).rounded())
+    }
+
     func testRingBufferKeepsOldestToNewestOrder() {
         var buffer = SampleRingBuffer(capacity: 3)
         [.ok(10), .ok(20), .ok(30), .ok(40)].forEach { buffer.append($0) }
@@ -98,7 +128,7 @@ final class NetmonCoreTests: XCTestCase {
     }
 
     private func render(_ samples: [NetworkSample], state: MonitorState, expanded: Bool) throws -> NSBitmapImageRep {
-        let image = StatusRenderer.image(samples: samples, state: state, expanded: expanded, dark: false)
+        let image = StatusRenderer.image(samples: samples, state: state, reveal: expanded ? 1 : 0, dark: false)
         return try XCTUnwrap(image.representations.first as? NSBitmapImageRep)
     }
 

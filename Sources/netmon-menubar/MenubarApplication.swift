@@ -65,8 +65,12 @@ final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private let model = MonitorModel()
+    private var reveal: CriticalSpring
+    private var displayLink: CADisplayLink?
+    private var lastFrame: CFTimeInterval?
 
     override init() {
+        reveal = CriticalSpring(value: model.displayMode.isExpanded(for: model.state.mode) ? 1 : 0)
         super.init()
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePopover)
@@ -84,15 +88,44 @@ final class StatusItemController: NSObject {
         model.accept(event)
     }
 
+    private var revealTarget: Double {
+        model.displayMode.isExpanded(for: model.state.mode) ? 1 : 0
+    }
+
     private func render() {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            reveal.snap(to: revealTarget)
+        }
+        if reveal.isSettled(at: revealTarget) {
+            reveal.snap(to: revealTarget)
+        } else if displayLink == nil, let button = statusItem.button {
+            let link = button.displayLink(target: self, selector: #selector(step))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        }
+        draw()
+    }
+
+    @objc private func step(_ link: CADisplayLink) {
+        // Clamp so a stalled frame doesn't jump the animation to its end.
+        let elapsed = lastFrame.map { min(link.targetTimestamp - $0, 1.0 / 30) } ?? link.duration
+        lastFrame = link.targetTimestamp
+        reveal.advance(toward: revealTarget, by: elapsed)
+        draw()
+        if reveal.isSettled(at: revealTarget) {
+            link.invalidate()
+            displayLink = nil
+            lastFrame = nil
+        }
+    }
+
+    private func draw() {
         guard let button = statusItem.button else { return }
         let dark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        button.image = StatusRenderer.image(
-            samples: model.samples,
-            state: model.state,
-            expanded: model.displayMode.isExpanded(for: model.state.mode),
-            dark: dark
-        )
+        let image = StatusRenderer.image(samples: model.samples, state: model.state, reveal: reveal.value, dark: dark)
+        // Set the length with the image so the item and its content move in the same frame.
+        statusItem.length = image.size.width
+        button.image = image
         button.setAccessibilityLabel(StatusRenderer.accessibilityLabel(for: model.state))
     }
 

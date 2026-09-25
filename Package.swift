@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "netmon-menubar",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .executable(name: "netmon-menubar", targets: ["netmon-menubar"])
