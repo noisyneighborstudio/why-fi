@@ -195,7 +195,9 @@ public struct MonitorState: Equatable, Sendable {
         let mode: MonitorMode
         if stats.activeLossRun >= Thresholds.outageSeconds {
             mode = gatewayReachable == true ? .gatewayOnly : .dead
-        } else if stats.p90Milliseconds.map({ $0 > 800 }) == true || stats.lossPercent > 2 {
+        } else if stats.p50Milliseconds.map({ $0 > Thresholds.normalMilliseconds }) == true
+            || stats.p90Milliseconds.map({ $0 > 800 }) == true
+            || stats.lossPercent > 2 {
             mode = .congested
         } else {
             mode = .fine

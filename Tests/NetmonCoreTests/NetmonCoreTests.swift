@@ -37,6 +37,13 @@ final class NetmonCoreTests: XCTestCase {
         XCTAssertEqual(MonitorState.evaluate(samples: [.ok(35), .lost, .lost], gatewayReachable: false).mode, .congested)
     }
 
+    func testSteadyHighLatencyIsCongestedEvenWithoutSpikesOrLoss() {
+        let steady = Array(repeating: NetworkSample.ok(718), count: 60)
+        XCTAssertEqual(MonitorState.evaluate(samples: steady, gatewayReachable: false).mode, .congested)
+        let fast = Array(repeating: NetworkSample.ok(40), count: 60)
+        XCTAssertEqual(MonitorState.evaluate(samples: fast, gatewayReachable: false).mode, .fine)
+    }
+
     func testAutoExpandsForEveryStateButFine() {
         XCTAssertFalse(DisplayMode.auto.isExpanded(for: .fine))
         XCTAssertTrue(MonitorMode.allCases.filter { $0 != .fine }.allSatisfy { DisplayMode.auto.isExpanded(for: $0) })
