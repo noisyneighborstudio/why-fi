@@ -4,26 +4,40 @@ WhyFi is a macOS 14+ menu bar network monitor. The executable target is `netmon-
 
 ## Releasing
 
-Generate the Sparkle EdDSA key pair once on the release machine. After the first release build resolves Sparkle, use the `generate_keys` binary from the required scratch path:
+WhyFi updates itself with Sparkle 2. Every push to `main` runs `.github/workflows/release.yml`:
+`swift test`, then semantic-release. semantic-release reads conventional commits (`feat:` minor,
+`fix:` patch, `!` or `BREAKING CHANGE:` major), tags the repo, and creates the GitHub release. A
+push with no releasable commits publishes nothing.
 
-```sh
-"/private/tmp/whyfi-build/artifacts/sparkle/Sparkle/bin/generate_keys"
-```
+- **Version.** `CFBundleShortVersionString` is semantic-release's version. `CFBundleVersion` is the
+  workflow run number, which only increases; Sparkle orders updates by it.
+- **Build.** `scripts/release-prepare.sh` runs `scripts/build-app.sh` with the Developer ID
+  identity, checks the signature and every framework dependency, notarizes and staples when the
+  notary secrets exist, and zips `WhyFi-<version>.zip`.
+- **Publish.** `scripts/publish-appcast.sh` signs the zip with the Sparkle EdDSA key, checks the
+  signature against the `SUPublicEDKey` baked into the app, uploads the zip to the release, waits
+  until GitHub serves it, then commits `appcast.xml` to the `appcasts` branch.
 
-The command stores the private key in the login keychain and prints the base64 public key. Pass that public value to `scripts/build-app.sh --ed-public-key` or let `scripts/release.sh` read it from the keychain. The public key goes in the app's `SUPublicEDKey` Info.plist entry. Keep the private key out of this repository. If a file is needed for an automated release, export it with `generate_keys -x` and pass it with `--ed-key-file` from a protected path.
+`updates.env` is the one place hosting is configured. The feed is
+`https://raw.githubusercontent.com/noisyneighborstudio/why-fi/appcasts/appcast.xml`, and both it
+and the release zips must be readable without credentials. The Sparkle key is the login-keychain
+account `whyfi` (`generate_keys --account whyfi`); its public half is `SPARKLE_PUBLIC_KEY` in
+`updates.env`.
 
-Use a Developer ID Application signing identity for distribution, for example the identity selected by `security find-identity -v -p codesigning`. Pass the literal `-` to make an ad-hoc build for local testing. If the app will be notarized, create a `notarytool` keychain profile on the release machine and pass its name with `--notary-profile`.
+### Repo secrets
 
-Build a release and generate its signed appcast with:
+| Secret | What |
+| ------ | ---- |
+| `DEVELOPER_ID_CERTIFICATE_BASE64` | Developer ID Application certificate and private key as .p12, base64 |
+| `DEVELOPER_ID_CERTIFICATE_PASSWORD` | the .p12 export password |
+| `BUILD_KEYCHAIN_PASSWORD` | any random string (password of the throwaway CI keychain) |
+| `DEVELOPER_ID_APPLICATION` | the identity name, e.g. `Developer ID Application: Name (TEAMID)` |
+| `SPARKLE_PRIVATE_KEY` | `generate_keys --account whyfi -x <file>`; must match `SPARKLE_PUBLIC_KEY` |
+| `NOTARY_KEY_P8`, `NOTARY_KEY_ID`, `NOTARY_KEY_ISSUER` | optional App Store Connect API key; without them builds are signed but not notarized |
 
-```sh
-scripts/release.sh \
-  --version 1.0.0 \
-  --build 1 \
-  --feed-url https://updates.example.invalid/whyfi/appcast.xml \
-  --download-url-prefix https://updates.example.invalid/whyfi/ \
-  --sign-identity "Developer ID Application: Your Name (TEAMID)" \
-  --notary-profile whyfi-notary
-```
+Key material stays in runner-temporary files or stdin and is removed in an `always()` step.
 
-The script writes `dist/WhyFi.app`, `dist/releases/WhyFi-VERSION.zip`, and `dist/releases/appcast.xml`. The appcast URL and every download URL must be reachable by users without interactive authentication. The GitHub repository is private, so its release assets cannot be used as a Sparkle feed unless the app can authenticate to GitHub.
+### Local builds
+
+`scripts/build-app.sh --version V --build N --feed-url URL --ed-public-key KEY --sign-identity ID`
+builds `dist/WhyFi.app`. Pass `-` as the identity for an ad-hoc build.
