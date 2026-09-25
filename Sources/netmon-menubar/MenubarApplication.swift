@@ -1,13 +1,21 @@
 import AppKit
+import Combine
 import NetmonCore
+import Sparkle
 import SwiftUI
 
+@MainActor
 final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
     private var statusController: StatusItemController?
     private var probes: NetworkProbeCoordinator?
+    private var updaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let statusController = StatusItemController()
+        let updaterController = Self.makeUpdaterController()
+        self.updaterController = updaterController
+        let updateAvailability = UpdateAvailability(updater: updaterController?.updater)
+
+        let statusController = StatusItemController(updateAvailability: updateAvailability)
         self.statusController = statusController
         let probes = NetworkProbeCoordinator { [weak statusController] event in
             statusController?.accept(event)
@@ -18,6 +26,49 @@ final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         probes?.stop()
+    }
+
+    private static func makeUpdaterController() -> SPUStandardUpdaterController? {
+        let bundle = Bundle.main
+        guard bundle.bundleURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame,
+              let feedURL = bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+              !feedURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        return SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+    }
+}
+
+@MainActor
+final class UpdateAvailability: NSObject, ObservableObject {
+    let updater: SPUUpdater?
+    @Published private(set) var canCheckForUpdates = false
+
+    private var observation: NSKeyValueObservation?
+
+    init(updater: SPUUpdater?) {
+        self.updater = updater
+        self.canCheckForUpdates = updater?.canCheckForUpdates ?? false
+        super.init()
+
+        observation = updater?.observe(\SPUUpdater.canCheckForUpdates, options: [.initial, .new]) { [weak self] updater, _ in
+            Task { @MainActor [weak self] in
+                self?.refresh()
+            }
+        }
+    }
+
+    func checkForUpdates() {
+        updater?.checkForUpdates()
+    }
+
+    private func refresh() {
+        canCheckForUpdates = updater?.canCheckForUpdates ?? false
     }
 }
 
@@ -68,8 +119,10 @@ final class StatusItemController: NSObject {
     private var reveal: CriticalSpring
     private var displayLink: CADisplayLink?
     private var lastFrame: CFTimeInterval?
+    private let updateAvailability: UpdateAvailability
 
-    override init() {
+    init(updateAvailability: UpdateAvailability) {
+        self.updateAvailability = updateAvailability
         reveal = CriticalSpring(value: model.displayMode.isExpanded(for: model.state.mode) ? 1 : 0)
         super.init()
         statusItem.button?.target = self
@@ -78,7 +131,7 @@ final class StatusItemController: NSObject {
         model.onChange = { [weak self] in self?.render() }
         render()
 
-        let hosting = NSHostingController(rootView: PopoverView(model: model))
+        let hosting = NSHostingController(rootView: PopoverView(model: model, updateAvailability: updateAvailability))
         hosting.sizingOptions = .preferredContentSize
         popover.contentViewController = hosting
         popover.behavior = .transient

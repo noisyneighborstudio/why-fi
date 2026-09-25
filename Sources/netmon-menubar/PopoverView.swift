@@ -24,6 +24,7 @@ private struct PopoverTheme {
 
 struct PopoverView: View {
     @ObservedObject var model: MonitorModel
+    @ObservedObject var updateAvailability: UpdateAvailability
     @Environment(\.colorScheme) private var colorScheme
 
     private static let chartMaximum: Double = 2_500
@@ -174,6 +175,21 @@ struct PopoverView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
+            }
+            if updateAvailability.updater != nil {
+                Button {
+                    updateAvailability.checkForUpdates()
+                } label: {
+                    HStack {
+                        Text("Check for Updates…")
+                        Spacer()
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .font(.system(size: 12))
+                    .foregroundColor(updateAvailability.canCheckForUpdates ? theme.sub : theme.sub.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+                .disabled(!updateAvailability.canCheckForUpdates)
             }
         }
     }
