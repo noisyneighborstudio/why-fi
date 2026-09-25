@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import NetmonCore
 
+/// `--render-fixture <state> --out <png> [--appearance light|dark] [--mode auto|compact|expanded]`
 struct FixtureRequest {
     enum Fixture: String {
         case fine
@@ -11,107 +12,66 @@ struct FixtureRequest {
     }
 
     enum RequestError: Error, CustomStringConvertible {
-        case missingFixture
-        case missingOutput
-        case unknownFixture(String)
-        case unknownAppearance(String)
+        case missing(String)
+        case invalid(String, String)
 
         var description: String {
             switch self {
-            case .missingFixture: return "expected --render-fixture <fine|congested|dead|gateway-only>"
-            case .missingOutput: return "expected --out <file.png>"
-            case .unknownFixture(let value): return "unknown fixture \(value)"
-            case .unknownAppearance(let value): return "unknown appearance \(value); expected light or dark"
+            case .missing(let flag): return "expected \(flag)"
+            case .invalid(let flag, let value): return "invalid \(flag) \(value)"
             }
         }
     }
 
     let fixture: Fixture
     let outputURL: URL
-    let appearance: NSAppearance
+    let dark: Bool
+    let displayMode: DisplayMode
 
     init(arguments: [String]) throws {
-        guard let fixtureIndex = arguments.firstIndex(of: "--render-fixture"), fixtureIndex + 1 < arguments.count else {
-            throw RequestError.missingFixture
+        func value(_ flag: String) -> String? {
+            arguments.firstIndex(of: flag).flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
         }
-        let fixtureValue = arguments[fixtureIndex + 1]
-        guard let fixture = Fixture(rawValue: fixtureValue) else {
-            throw RequestError.unknownFixture(fixtureValue)
-        }
-        guard let outputIndex = arguments.firstIndex(of: "--out"), outputIndex + 1 < arguments.count else {
-            throw RequestError.missingOutput
-        }
-        let appearanceValue = arguments.firstIndex(of: "--appearance").flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil } ?? "light"
-        switch appearanceValue {
-        case "light": appearance = NSAppearance(named: .aqua)!
-        case "dark": appearance = NSAppearance(named: .darkAqua)!
-        default: throw RequestError.unknownAppearance(appearanceValue)
-        }
+        guard let fixtureValue = value("--render-fixture") else { throw RequestError.missing("--render-fixture <fine|congested|dead|gateway-only>") }
+        guard let fixture = Fixture(rawValue: fixtureValue) else { throw RequestError.invalid("fixture", fixtureValue) }
+        guard let output = value("--out") else { throw RequestError.missing("--out <file.png>") }
+        let appearance = value("--appearance") ?? "light"
+        guard ["light", "dark"].contains(appearance) else { throw RequestError.invalid("appearance", appearance) }
+        let modeValue = value("--mode") ?? "auto"
+        guard let displayMode = DisplayMode(rawValue: modeValue) else { throw RequestError.invalid("mode", modeValue) }
         self.fixture = fixture
-        self.outputURL = URL(fileURLWithPath: arguments[outputIndex + 1], isDirectory: false)
+        self.outputURL = URL(fileURLWithPath: output)
+        self.dark = appearance == "dark"
+        self.displayMode = displayMode
     }
 
     func render() throws {
-        let samples = FixtureSamples.samples(for: fixture)
-        let state = FixtureSamples.state(for: fixture, samples: samples)
-        // Same palette as the live status item, resolved against a named appearance.
-        var renderError: Error?
-        appearance.performAsCurrentDrawingAppearance {
-            do {
-                try StripRenderer.writePNG(samples: samples, state: state, to: outputURL)
-            } catch {
-                renderError = error
-            }
+        let samples = Self.samples(for: fixture)
+        let state = MonitorState.evaluate(samples: samples, gatewayReachable: fixture == .gatewayOnly)
+        let image = StatusRenderer.image(samples: samples, state: state, expanded: displayMode.isExpanded(for: state.mode), dark: dark)
+        guard let bitmap = image.representations.first as? NSBitmapImageRep,
+              let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw RequestError.invalid("render", fixture.rawValue)
         }
-        if let renderError { throw renderError }
-    }
-}
-
-private enum FixtureSamples {
-    static func samples(for fixture: FixtureRequest.Fixture) -> [NetworkSample] {
-        switch fixture {
-        case .fine:
-            return (0..<60).map { index in
-                .ok(32 + Double((index * 7) % 17))
-            }
-        case .congested:
-            return (0..<60).map { index in
-                switch index % 9 {
-                case 0: return .lost
-                case 1, 5: return .late(620 + Double((index * 83) % 440))
-                case 2: return .ok(330)
-                case 3: return .late(1_180)
-                case 4: return .ok(540)
-                case 6: return .ok(90)
-                case 7: return .late(860)
-                default: return .ok(220)
-                }
-            }
-        case .dead:
-            let healthy = (0..<25).map { _ in NetworkSample.ok(42) }
-            return healthy + Array(repeating: NetworkSample.lost, count: 35)
-        case .gatewayOnly:
-            return (0..<60).map { index in
-                switch index % 4 {
-                case 0, 1: return .lost
-                case 2: return .late(980)
-                default: return .lost
-                }
-            }
-        }
+        try data.write(to: outputURL, options: .atomic)
     }
 
-    static func state(for fixture: FixtureRequest.Fixture, samples: [NetworkSample]) -> MonitorState {
-        let stats = WindowStats(samples: samples)
+    /// Mirrors the handoff mockup's sample patterns, as round-trip times.
+    private static func samples(for fixture: Fixture) -> [NetworkSample] {
         switch fixture {
         case .fine:
-            return MonitorState(mode: .fine, stats: stats, pulseOn: true)
+            return (0..<60).map { .ok(14 + Double(($0 * 7) % 11)) }
         case .congested:
-            return MonitorState(mode: .congested, stats: stats, pulseOn: true)
+            return (0..<60).map { index in
+                if [43, 50, 57].contains(index) { return .lost }
+                let pattern: [Double] = [180, 520, 1_150, 300, 2_400, 760, 240, 1_600, 900, 420]
+                return .classify(milliseconds: pattern[index % pattern.count], interval: 1)
+            }
         case .dead:
-            return MonitorState(mode: .dead, stats: stats, outageSeconds: 23, pulseOn: false)
+            return (0..<41).map { .ok(18 + Double($0 % 5) * 3) } + Array(repeating: .lost, count: 19)
         case .gatewayOnly:
-            return MonitorState(mode: .gatewayOnly, stats: stats, pulseOn: false, gatewayReachable: true)
+            return (0..<34).map { .ok(20 + Double($0 % 4) * 4, gateway: 3) }
+                + Array(repeating: .lost(gateway: 3), count: 26)
         }
     }
 }

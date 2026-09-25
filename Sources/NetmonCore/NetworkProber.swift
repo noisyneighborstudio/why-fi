@@ -32,7 +32,8 @@ public final class NetworkProbeCoordinator {
 
     private struct Slot {
         let sentAt: UInt64
-        var sample: NetworkSample?
+        var internetMilliseconds: Double?
+        var gatewayMilliseconds: Double?
         var isClosed = false
     }
 
@@ -104,19 +105,21 @@ public final class NetworkProbeCoordinator {
         guard let sequence = slots.keys.first(where: { UInt16(truncatingIfNeeded: $0) == icmpSequence }) else { return }
         if address == publicAddress {
             receiveReply(for: sequence)
-        } else if address == gatewayAddress {
+        } else if address == gatewayAddress, var slot = slots[sequence] {
             lastGatewayReply = max(lastGatewayReply ?? sequence, sequence)
+            if slot.gatewayMilliseconds == nil, !slot.isClosed {
+                slot.gatewayMilliseconds = elapsedMilliseconds(since: slot.sentAt)
+                slots[sequence] = slot
+            }
         }
     }
 
     private func receiveReply(for sequence: Int) {
-        guard var slot = slots[sequence], slot.sample == nil else { return }
-        let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - slot.sentAt) / 1_000_000
-        let sample = NetworkSample.classify(milliseconds: milliseconds, interval: interval)
-        slot.sample = sample
+        guard var slot = slots[sequence], slot.internetMilliseconds == nil else { return }
+        slot.internetMilliseconds = elapsedMilliseconds(since: slot.sentAt)
         slots[sequence] = slot
         if slot.isClosed {
-            emit(.corrected(sequence: sequence, sample: sample))
+            emit(.corrected(sequence: sequence, sample: sample(for: slot)))
         }
     }
 
@@ -125,7 +128,15 @@ public final class NetworkProbeCoordinator {
         slot.isClosed = true
         slots[sequence] = slot
         let gatewayReachable = gatewayAddress.map { _ in (lastGatewayReply ?? .min) >= sequence - 2 }
-        emit(.closed(sequence: sequence, sample: slot.sample ?? .lost, gatewayReachable: gatewayReachable))
+        emit(.closed(sequence: sequence, sample: sample(for: slot), gatewayReachable: gatewayReachable))
+    }
+
+    private func sample(for slot: Slot) -> NetworkSample {
+        NetworkSample.classify(milliseconds: slot.internetMilliseconds, interval: interval, gateway: slot.gatewayMilliseconds)
+    }
+
+    private func elapsedMilliseconds(since sentAt: UInt64) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - sentAt) / 1_000_000
     }
 
     private func emit(_ event: ProbeEvent) {
