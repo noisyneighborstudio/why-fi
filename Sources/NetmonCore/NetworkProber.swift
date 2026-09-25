@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 public enum ProbeEvent: Sendable {
     /// A slot closed one interval after it was sent: on time, or provisionally lost.
@@ -9,7 +8,9 @@ public enum ProbeEvent: Sendable {
     case failed(String)
 }
 
-/// Sends one probe slot per interval to a public IP over ICMP and TCP, plus ICMP to the gateway.
+/// Sends one ICMP echo per interval to a public IP and to the gateway.
+/// No TCP probe: in-flight and satellite links run proxies that answer TCP handshakes locally,
+/// so connect time measures the proxy, not the internet.
 /// Everything runs on one serial queue, and nothing on it blocks, so slots never compress.
 public final class NetworkProbeCoordinator {
     public typealias EventHandler = (ProbeEvent) -> Void
@@ -19,7 +20,6 @@ public final class NetworkProbeCoordinator {
 
     private let queue = DispatchQueue(label: "netmon-menubar.probes", qos: .utility)
     private let publicAddress: String
-    private let publicPort: NWEndpoint.Port
     private let interval: TimeInterval
     private let handler: EventHandler
     private var timer: DispatchSourceTimer?
@@ -34,17 +34,14 @@ public final class NetworkProbeCoordinator {
         let sentAt: UInt64
         var sample: NetworkSample?
         var isClosed = false
-        var connection: NWConnection?
     }
 
     public init(
         publicAddress: String = "1.1.1.1",
-        publicPort: UInt16 = 443,
         interval: TimeInterval = 1,
         handler: @escaping EventHandler
     ) {
         self.publicAddress = publicAddress
-        self.publicPort = NWEndpoint.Port(rawValue: publicPort) ?? .https
         self.interval = interval
         self.handler = handler
     }
@@ -78,7 +75,6 @@ public final class NetworkProbeCoordinator {
             timer = nil
             echo?.close()
             echo = nil
-            slots.values.forEach { $0.connection?.cancel() }
             slots.removeAll()
             if let activity { ProcessInfo.processInfo.endActivity(activity) }
             activity = nil
@@ -87,9 +83,7 @@ public final class NetworkProbeCoordinator {
 
     private func tick() {
         closeSlot(nextSequence - 1)
-        for sequence in slots.keys.filter({ $0 < nextSequence - Self.graceSlots }) {
-            slots.removeValue(forKey: sequence)?.connection?.cancel()
-        }
+        slots = slots.filter { $0.key >= nextSequence - Self.graceSlots }
         if nextSequence % 30 == 0 {
             gatewayAddress = DefaultGatewayResolver.resolve()
         }
@@ -98,22 +92,12 @@ public final class NetworkProbeCoordinator {
     }
 
     private func sendSlot(_ sequence: Int) {
-        var slot = Slot(sentAt: DispatchTime.now().uptimeNanoseconds)
+        slots[sequence] = Slot(sentAt: DispatchTime.now().uptimeNanoseconds)
         let icmpSequence = UInt16(truncatingIfNeeded: sequence)
         echo?.send(to: publicAddress, sequence: icmpSequence)
         if let gatewayAddress {
             echo?.send(to: gatewayAddress, sequence: icmpSequence)
         }
-
-        // TCP rides alongside ICMP so an AP that deprioritizes ping doesn't read as loss.
-        let connection = NWConnection(host: NWEndpoint.Host(publicAddress), port: publicPort, using: .tcp)
-        connection.stateUpdateHandler = { [weak self] state in
-            guard case .ready = state else { return }
-            self?.receiveReply(for: sequence)
-        }
-        connection.start(queue: queue)
-        slot.connection = connection
-        slots[sequence] = slot
     }
 
     private func receiveEcho(from address: String, sequence icmpSequence: UInt16) {
@@ -130,8 +114,6 @@ public final class NetworkProbeCoordinator {
         let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - slot.sentAt) / 1_000_000
         let sample = NetworkSample.classify(milliseconds: milliseconds, interval: interval)
         slot.sample = sample
-        slot.connection?.cancel()
-        slot.connection = nil
         slots[sequence] = slot
         if slot.isClosed {
             emit(.corrected(sequence: sequence, sample: sample))
