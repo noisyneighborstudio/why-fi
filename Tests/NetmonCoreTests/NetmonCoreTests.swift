@@ -39,17 +39,21 @@ final class NetmonCoreTests: XCTestCase {
         XCTAssertEqual(MonitorState.evaluate(samples: [.ok(35), .lost, .lost], gatewayReachable: false, pulseOn: false).mode, .congested)
     }
 
-    func testStatusRenderIsNotClippedAndDrawsTheHairline() throws {
-        var samples = Array(repeating: NetworkSample.ok(40), count: 59)
-        samples.append(.lost)
-        let image = StripRenderer.image(samples: samples, state: MonitorState(mode: .fine, stats: WindowStats(samples: samples)))
-        let bitmap = try XCTUnwrap(image.representations.compactMap { $0 as? NSBitmapImageRep }.first)
+    func testStatusRenderIsGaplessAndDrawsLateBarsSolidAmber() throws {
+        var samples = Array(repeating: NetworkSample.ok(40), count: 58)
+        samples += [.late(1_500), .lost]
+        let bitmap = try render(samples, state: MonitorState(mode: .fine, stats: WindowStats(samples: samples), pulseOn: true))
         XCTAssertEqual(bitmap.pixelsWide, 184)
-        // Last slot starts at 1pt + 59 * 1.5pt = 89.5pt (px 179); the loss rail spans px 3..9 from the bottom.
+        // Row 31 from the top is just above the 5.5pt baseline, inside every bar.
+        // Pixel 4 was the gap between the first two bars; the skyline is now continuous.
+        XCTAssertGreaterThan(try XCTUnwrap(bitmap.colorAt(x: 4, y: 31)).alphaComponent, 0.5)
+        // Slot 58 starts at 1pt + 58 * 1.5pt = 88pt (px 176): a late bar, fully opaque amber.
+        let late = try XCTUnwrap(bitmap.colorAt(x: 176, y: 31)?.usingColorSpace(.sRGB))
+        XCTAssertGreaterThan(late.alphaComponent, 0.9)
+        XCTAssertGreaterThan(late.redComponent, 0.7)
+        XCTAssertLessThan(late.blueComponent, 0.3)
+        // Slot 59 (px 179) is lost: a slab below the baseline, px 3..9 from the bottom.
         XCTAssertGreaterThan(try XCTUnwrap(bitmap.colorAt(x: 179, y: 44 - 6)).alphaComponent, 0.5)
-        // 200ms hairline: one pixel tall at baseline 5.5pt + bar height for 200ms, above the 40ms bars.
-        let hairlinePixels = Int((5.5 + CGFloat(RTTScale.barHeight(milliseconds: 200, maxHeight: 14))) * 2)
-        XCTAssertGreaterThan(try XCTUnwrap(bitmap.colorAt(x: 20, y: 44 - hairlinePixels - 1)).alphaComponent, 0.1)
     }
 
     func testContiguousLossRunsMergeAndScatteredLossDoesNot() {
@@ -84,12 +88,21 @@ final class NetmonCoreTests: XCTestCase {
         XCTAssertEqual(buffer.samples, [.ok(20), .ok(30), .ok(40)])
     }
 
-    func testToneTurnsRedOnlyForAnActiveThreeSecondLossRun() {
-        let samples: [NetworkSample] = [.ok(35), .lost, .lost, .lost]
-        let state = MonitorState(mode: .dead, stats: WindowStats(samples: samples))
-        XCTAssertEqual(state.tone, .red)
+    func testOutageSlabIsRedWhenDeadAndAmberWhenOnlyTheGatewayAnswers() throws {
+        let samples = Array(repeating: NetworkSample.ok(40), count: 55) + Array(repeating: NetworkSample.lost, count: 5)
+        let dead = try render(samples, state: MonitorState.evaluate(samples: samples, gatewayReachable: false, pulseOn: true))
+        let gateway = try render(samples, state: MonitorState.evaluate(samples: samples, gatewayReachable: true, pulseOn: true))
+        let red = try XCTUnwrap(dead.colorAt(x: 179, y: 44 - 6)?.usingColorSpace(.sRGB))
+        let amber = try XCTUnwrap(gateway.colorAt(x: 179, y: 44 - 6)?.usingColorSpace(.sRGB))
+        XCTAssertLessThan(red.greenComponent, 0.3)
+        XCTAssertGreaterThan(amber.greenComponent, 0.35)
+    }
 
-        let shortRun = MonitorState(mode: .gatewayOnly, stats: WindowStats(samples: [.lost, .lost]))
-        XCTAssertEqual(shortRun.tone, .amber)
+    private func render(_ samples: [NetworkSample], state: MonitorState) throws -> NSBitmapImageRep {
+        var image = NSImage()
+        NSAppearance(named: .aqua)!.performAsCurrentDrawingAppearance {
+            image = StripRenderer.image(samples: samples, state: state)
+        }
+        return try XCTUnwrap(image.representations.compactMap { $0 as? NSBitmapImageRep }.first)
     }
 }

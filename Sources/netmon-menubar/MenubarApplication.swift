@@ -65,9 +65,9 @@ final class StatusItemController: NSObject {
 
     private func renderStatus(samples: [NetworkSample]) {
         guard let button = statusItem.button else { return }
-        // Healthy is a template image so the system owns light/dark, tinting, and highlight.
-        // Colored states resolve against the menubar's own appearance, not the app's.
-        let isTemplate = state.tone == .monochrome
+        // All on time is a template image so the system owns light/dark, tinting, and highlight.
+        // Colored strips resolve against the menubar's own appearance, not the app's.
+        let isTemplate = samples.allSatisfy { $0.outcome == .ok }
         let appearance = isTemplate ? NSAppearance(named: .aqua)! : button.effectiveAppearance
         var image = NSImage(size: StripRenderer.statusSize)
         appearance.performAsCurrentDrawingAppearance {

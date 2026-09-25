@@ -170,12 +170,6 @@ public enum MonitorMode: String, CaseIterable, Sendable {
     case dead
 }
 
-public enum RenderTone: String, Sendable {
-    case monochrome
-    case amber
-    case red
-}
-
 public struct MonitorState: Equatable, Sendable {
     public let mode: MonitorMode
     public let stats: WindowStats
@@ -228,14 +222,6 @@ public struct MonitorState: Equatable, Sendable {
 
     public var activeLossRun: Int { stats.activeLossRun }
 
-    public var tone: RenderTone {
-        if stats.activeLossRun >= 3 { return .red }
-        if stats.p90Milliseconds.map({ $0 > 800 }) == true || stats.lossPercent > 2 || mode == .gatewayOnly {
-            return .amber
-        }
-        return .monochrome
-    }
-
     public var showsOutageDuration: Bool {
         mode == .dead && outageSeconds >= 5
     }
@@ -243,37 +229,24 @@ public struct MonitorState: Equatable, Sendable {
 
 public struct RendererPalette {
     public let ink: NSColor
-    public let hairline: NSColor
-    public let rail: NSColor
     public let amber: NSColor
     public let red: NSColor
     public let background: NSColor
 
-    public init(
-        ink: NSColor,
-        hairline: NSColor,
-        rail: NSColor,
-        amber: NSColor,
-        red: NSColor,
-        background: NSColor = .clear
-    ) {
+    public init(ink: NSColor, amber: NSColor, red: NSColor, background: NSColor = .clear) {
         self.ink = ink
-        self.hairline = hairline
-        self.rail = rail
         self.amber = amber
         self.red = red
         self.background = background
     }
 
     public static var menuBar: RendererPalette {
-        let ink = NSColor.labelColor
-        return RendererPalette(
-            ink: ink.withAlphaComponent(0.88),
-            hairline: ink.withAlphaComponent(0.25),
-            rail: ink.withAlphaComponent(0.74),
-            amber: .systemOrange,
-            red: .systemRed
-        )
+        // systemOrange washes out on bright wallpaper behind a light menubar.
+        let amber = NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? .systemOrange
+                : NSColor(srgbRed: 0.85, green: 0.4, blue: 0, alpha: 1)
+        }
+        return RendererPalette(ink: .labelColor, amber: amber, red: .systemRed)
     }
-
 }
