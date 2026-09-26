@@ -51,15 +51,31 @@ final class NetmonCoreTests: XCTestCase {
         XCTAssertFalse(MonitorMode.allCases.contains { DisplayMode.compact.isExpanded(for: $0) })
     }
 
-    func testCompactFineShowsAGreenBadgeThroughAKnockout() throws {
+    func testCompactFineShowsTheBeatAndAGreenDot() throws {
         let samples = Array(repeating: NetworkSample.ok(18), count: 30)
         let bitmap = try render(samples, state: MonitorState.evaluate(samples: samples, gatewayReachable: false), expanded: false)
         XCTAssertEqual(bitmap.pixelsWide, 60)
-        // Badge center: glyph origin (6, 4) + (15.6, 11.6) = (21.6, 15.6)pt.
-        let badge = try color(bitmap, x: 21.6, y: 15.6)
-        XCTAssertGreaterThan(badge.greenComponent, badge.redComponent + 0.3)
-        // The ring between radius 1.95 and 3.45 is cleared, even where the outer arc would be.
-        XCTAssertLessThan(try color(bitmap, x: 21.6 + 2.7, y: 15.6).alphaComponent, 0.1)
+        // Dot center: glyph origin (6, 4) + (15.5, 11) = (21.5, 15)pt.
+        let dot = try color(bitmap, x: 21.5, y: 15)
+        XCTAssertGreaterThan(dot.greenComponent, dot.redComponent + 0.3)
+        // The beat's peak vertex (7, 2) is inked; the baseline at x 9 (mid-spike) is not.
+        XCTAssertGreaterThan(try color(bitmap, x: 6 + 7, y: 4 + 2).alphaComponent, 0.5)
+        XCTAssertLessThan(try color(bitmap, x: 6 + 13.5, y: 4 + 8).alphaComponent, 0.1)
+    }
+
+    func testDeadIsARedFlatlineWithADotOnlyWhenIconOnly() throws {
+        let samples = Array(repeating: NetworkSample.ok(18), count: 25) + Array(repeating: NetworkSample.lost, count: 5)
+        let state = MonitorState.evaluate(samples: samples, gatewayReachable: false)
+        for expanded in [false, true] {
+            let bitmap = try render(samples, state: state, expanded: expanded)
+            let line = try color(bitmap, x: 6 + 7, y: 4 + 8)
+            XCTAssertGreaterThan(line.redComponent, 0.7)
+            XCTAssertLessThan(line.greenComponent, 0.2)
+            // No spike above the flatline.
+            XCTAssertLessThan(try color(bitmap, x: 6 + 7, y: 4 + 3).alphaComponent, 0.1)
+            let dot = try color(bitmap, x: 21.5, y: 15).alphaComponent
+            expanded ? XCTAssertLessThan(dot, 0.1) : XCTAssertGreaterThan(dot, 0.9)
+        }
     }
 
     func testExpandedSparklineMarksLateBarsLossAndOutage() throws {

@@ -56,7 +56,7 @@ public enum StatusRenderer {
         context.scaleBy(x: 1, y: -1)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
-        // Transparency layers keep each layer's knockouts from clearing the other.
+        // Transparency layers fade each glyph variant as a whole, not stroke by stroke.
         func layer(_ alpha: CGFloat, _ draw: () -> Void) {
             guard alpha > 0 else { return }
             context.saveGState()
@@ -116,55 +116,34 @@ public enum StatusRenderer {
     }
 
     private static func drawGlyph(in context: CGContext, state: MonitorState, expanded: Bool, palette: StatusPalette) {
-        var opacity: [CGFloat] = [1, 1, 1] // inner arc and dot, middle arc, outer arc
-        var badge: NSColor?
-        var slash = false
+        // One pixel-snapped beat in every live state; the dot color carries the state.
+        // Per-state shapes turned to blobs at 1× and 2×, so dead is the only shape change.
+        let dead = state.hasData && state.mode == .dead
+        let trace: NSColor = dead ? palette.red : palette.fg.withAlphaComponent(state.hasData ? 1 : 0.35)
+        var dot: NSColor?
         switch state.mode {
-        case .fine: badge = expanded ? nil : palette.green
-        case .congested: badge = palette.orange
-        case .gatewayOnly: opacity = [1, 0.28, 0.28]; badge = palette.orange
-        case .dead:
-            opacity = [0.35, 0.35, 0.35]
-            // Slash plus badge is too busy at 18pt; icon-only carries it with a red dot.
-            if expanded { slash = true } else { badge = palette.red }
+        case .fine: dot = expanded ? nil : palette.green
+        case .congested, .gatewayOnly: dot = palette.orange
+        case .dead: dot = expanded ? nil : palette.red
         }
-        if !state.hasData { opacity = [0.35, 0.35, 0.35]; badge = nil; slash = false }
+        if !state.hasData { dot = nil }
 
         context.saveGState()
         context.translateBy(x: padding, y: (height - 14) / 2)
-        let center = CGPoint(x: 9, y: 12.5)
-        context.setLineWidth(1.8)
+        context.setLineWidth(2)
         context.setLineCap(.round)
-        for (radius, alpha) in zip([4.0, 7.5, 11.0], opacity) {
-            context.setStrokeColor(palette.fg.withAlphaComponent(alpha).cgColor)
-            context.addArc(center: center, radius: radius, startAngle: -.pi * 3 / 4, endAngle: -.pi / 4, clockwise: false)
-            context.strokePath()
+        context.setLineJoin(.round)
+        context.setStrokeColor(trace.cgColor)
+        context.move(to: CGPoint(x: 1, y: 8))
+        if dead {
+            context.addLine(to: CGPoint(x: 12, y: 8))
+        } else {
+            [(4, 8), (7, 2), (10, 12), (12, 8)].forEach { context.addLine(to: CGPoint(x: $0.0, y: $0.1)) }
         }
-        context.setFillColor(palette.fg.withAlphaComponent(opacity[0]).cgColor)
-        context.fillEllipse(in: CGRect(x: center.x - 1.4, y: center.y - 1.4, width: 2.8, height: 2.8))
-
-        // Knockouts clear to transparent so the menu bar shows through, whatever its color.
-        if slash {
-            context.move(to: CGPoint(x: 2, y: 0.8))
-            context.addLine(to: CGPoint(x: 16, y: 13.6))
-            context.setBlendMode(.clear)
-            context.setLineWidth(3.8)
-            context.strokePath()
-            context.setBlendMode(.normal)
-            context.move(to: CGPoint(x: 2, y: 0.8))
-            context.addLine(to: CGPoint(x: 16, y: 13.6))
-            context.setStrokeColor(palette.red.cgColor)
-            context.setLineWidth(1.7)
-            context.strokePath()
-        }
-        if let badge {
-            // r 2.7 with a centered 1.5pt ring: knock out to 3.45, fill to 1.95.
-            let badgeCenter = CGPoint(x: 15.6, y: 11.6)
-            context.setBlendMode(.clear)
-            context.fillEllipse(in: CGRect(x: badgeCenter.x - 3.45, y: badgeCenter.y - 3.45, width: 6.9, height: 6.9))
-            context.setBlendMode(.normal)
-            context.setFillColor(badge.cgColor)
-            context.fillEllipse(in: CGRect(x: badgeCenter.x - 1.95, y: badgeCenter.y - 1.95, width: 3.9, height: 3.9))
+        context.strokePath()
+        if let dot {
+            context.setFillColor(dot.cgColor)
+            context.fillEllipse(in: CGRect(x: 15.5 - 2.5, y: 11 - 2.5, width: 5, height: 5))
         }
         context.restoreGState()
     }
