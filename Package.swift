@@ -10,6 +10,9 @@ let package = Package(
     products: [
         .executable(name: "netmon-menubar", targets: ["netmon-menubar"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
+    ],
     targets: [
         .target(
             name: "NetmonCore",
@@ -17,7 +20,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "netmon-menubar",
-            dependencies: ["NetmonCore"],
+            dependencies: [
+                "NetmonCore",
+                .product(name: "Sparkle", package: "sparkle")
+            ],
             path: "Sources/netmon-menubar"
         ),
         .testTarget(

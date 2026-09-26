@@ -2,3 +2,6 @@
 .swiftpm/
 *.png
 !docs/*.png
+dist/
+node_modules/
+*.zip
