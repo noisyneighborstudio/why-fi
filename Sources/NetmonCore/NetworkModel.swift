@@ -179,6 +179,16 @@ public enum MonitorMode: String, CaseIterable, Codable, Sendable {
     case congested
     case gatewayOnly = "gateway-only"
     case dead
+
+    /// Worse states outrank better ones when refresh budget is scarce.
+    public var severity: Int {
+        switch self {
+        case .fine: return 0
+        case .congested: return 1
+        case .gatewayOnly: return 2
+        case .dead: return 3
+        }
+    }
 }
 
 public struct MonitorState: Equatable, Sendable {
