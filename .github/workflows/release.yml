@@ -35,7 +35,7 @@ jobs:
           for name in CERTIFICATE CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD; do
             [ -n "${!name}" ] || { echo "::error::secret for $name is not set"; exit 1; }
           done
-          cert="$RUNNER_TEMP/developer-id.p12"; keychain="$RUNNER_TEMP/whyfi.keychain-db"
+          cert="$RUNNER_TEMP/developer-id.p12"; keychain="$RUNNER_TEMP/nofi.keychain-db"
           umask 077; printf '%s' "$CERTIFICATE" | base64 -D > "$cert"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
@@ -46,18 +46,18 @@ jobs:
       - name: Release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          # Only needed when WHYFI_UPDATES_REPO (updates.env) is another repo.
-          WHYFI_UPDATES_TOKEN: ${{ secrets.WHYFI_UPDATES_TOKEN || github.token }}
+          # Only needed when NOFI_UPDATES_REPO (updates.env) is another repo.
+          NOFI_UPDATES_TOKEN: ${{ secrets.NOFI_UPDATES_TOKEN || github.token }}
           # Only increases. Renaming this file resets it, so don't.
-          WHYFI_BUILD_NUMBER: ${{ github.run_number }}
-          WHYFI_SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          NOFI_BUILD_NUMBER: ${{ github.run_number }}
+          NOFI_SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_KEY_ISSUER: ${{ secrets.NOTARY_KEY_ISSUER }}
           NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8 }}
         run: |
           set -euo pipefail
-          for name in WHYFI_SIGN_IDENTITY SPARKLE_PRIVATE_KEY; do
+          for name in NOFI_SIGN_IDENTITY SPARKLE_PRIVATE_KEY; do
             [ -n "${!name}" ] || { echo "::error::secret for $name is not set"; exit 1; }
           done
           npm ci --no-audit --no-fund
@@ -66,4 +66,4 @@ jobs:
         if: always()
         run: |
           rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notary.p8"
-          security delete-keychain "$RUNNER_TEMP/whyfi.keychain-db" 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/nofi.keychain-db" 2>/dev/null || true

@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH_PATH=/private/tmp/whyfi-build
-CLANG_CACHE_PATH=/private/tmp/whyfi-clang-cache
-SWIFT_CACHE_PATH=/private/tmp/whyfi-swift-cache
-APP_DIR="$ROOT_DIR/dist/WhyFi.app"
+SCRATCH_PATH=/private/tmp/nofi-build
+CLANG_CACHE_PATH=/private/tmp/nofi-clang-cache
+SWIFT_CACHE_PATH=/private/tmp/nofi-swift-cache
+APP_DIR="$ROOT_DIR/dist/nofi.app"
 
 VERSION=
 BUILD=
@@ -93,11 +93,11 @@ cat > "$INFO_PLIST" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>studio.noisyneighbor.whyfi</string>
+    <string>studio.noisyneighbor.nofi</string>
     <key>CFBundleName</key>
-    <string>WhyFi</string>
+    <string>nofi</string>
     <key>CFBundleDisplayName</key>
-    <string>WhyFi</string>
+    <string>nofi</string>
     <key>CFBundleExecutable</key>
     <string>netmon-menubar</string>
     <key>CFBundlePackageType</key>
@@ -159,7 +159,7 @@ sign_code "$SPARKLE_FRAMEWORK/Versions/B/Autoupdate"
 sign_code "$SPARKLE_FRAMEWORK/Versions/B/Updater.app"
 sign_code "$SPARKLE_FRAMEWORK"
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
-    ADHOC_ENTITLEMENTS="$(mktemp /private/tmp/whyfi-entitlements.XXXXXX)"
+    ADHOC_ENTITLEMENTS="$(mktemp /private/tmp/nofi-entitlements.XXXXXX)"
     cat > "$ADHOC_ENTITLEMENTS" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

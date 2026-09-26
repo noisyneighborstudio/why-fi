@@ -1,20 +1,20 @@
 #!/bin/bash
 # semantic-release prepare: build the signed (and, with notary credentials, notarized) app
-# for the version semantic-release computed, and leave WhyFi-<version>.zip in the checkout.
+# for the version semantic-release computed, and leave nofi-<version>.zip in the checkout.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 version=${1:?usage: release-prepare.sh <version>}
 # CFBundleVersion drives Sparkle's ordering, so it must only ever increase.
-build=${WHYFI_BUILD_NUMBER:?WHYFI_BUILD_NUMBER required (CI: the workflow run number)}
-[[ $build =~ ^[0-9]+$ ]] || { echo "✗ WHYFI_BUILD_NUMBER must be a positive integer: $build" >&2; exit 1; }
-: "${WHYFI_SIGN_IDENTITY:?WHYFI_SIGN_IDENTITY required}"
+build=${NOFI_BUILD_NUMBER:?NOFI_BUILD_NUMBER required (CI: the workflow run number)}
+[[ $build =~ ^[0-9]+$ ]] || { echo "✗ NOFI_BUILD_NUMBER must be a positive integer: $build" >&2; exit 1; }
+: "${NOFI_SIGN_IDENTITY:?NOFI_SIGN_IDENTITY required}"
 source ./updates.env
 
-scripts/build-app.sh --version "$version" --build "$build" --feed-url "$WHYFI_FEED_URL" \
-    --ed-public-key "$SPARKLE_PUBLIC_KEY" --sign-identity "$WHYFI_SIGN_IDENTITY"
+scripts/build-app.sh --version "$version" --build "$build" --feed-url "$NOFI_FEED_URL" \
+    --ed-public-key "$SPARKLE_PUBLIC_KEY" --sign-identity "$NOFI_SIGN_IDENTITY"
 
-app=dist/WhyFi.app
+app=dist/nofi.app
 codesign --verify --deep --strict --verbose=2 "$app"
 # Every @rpath dependency must resolve inside the bundle, or dyld kills the app before main().
 for dep in $(otool -L "$app/Contents/MacOS/netmon-menubar" | awk '/@rpath\//{print $1}'); do
@@ -34,6 +34,6 @@ else
     echo "::warning::NOTARY_KEY_P8 is not set; publishing signed but un-notarized (browser downloads will be blocked by Gatekeeper)"
 fi
 
-rm -f WhyFi-*.zip
-ditto -c -k --keepParent "$app" "WhyFi-$version.zip"
+rm -f nofi-*.zip
+ditto -c -k --keepParent "$app" "nofi-$version.zip"
 echo "✓ Prepared $version (build $build)"
