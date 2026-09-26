@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
 <channel><title>nofi Updates</title><item>
-<title>nofi 2.3.0</title><pubDate>Sat, 26 Sep 2026 19:55:26 +0000</pubDate>
+<title>nofi 2.4.0</title><pubDate>Sat, 26 Sep 2026 20:03:59 +0000</pubDate>
 <link>https://github.com/noisyneighborstudio/nofi/releases/latest</link>
 <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
 <sparkle:informationalUpdate><sparkle:belowVersion>3</sparkle:belowVersion></sparkle:informationalUpdate>
-<enclosure url="https://github.com/noisyneighborstudio/nofi/releases/download/v2.3.0/nofi-2.3.0.zip" sparkle:version="7" sparkle:shortVersionString="2.3.0" length="1753958" type="application/octet-stream" sparkle:edSignature="3qW+8t/NLtp8lbAX34Gk/uYvws0+rDZwrZzCA5Ypvlbsk6gT75eoOzUL3K+hBFd7JgKLrF3kYZUP7vKN8ic8DQ=="/>
+<enclosure url="https://github.com/noisyneighborstudio/nofi/releases/download/v2.4.0/nofi-2.4.0.zip" sparkle:version="8" sparkle:shortVersionString="2.4.0" length="1758318" type="application/octet-stream" sparkle:edSignature="+gPidraqv2SNUNHwkP+90FJPXweUTD7q8fpZQytRVuR9uXL/04GqZ6NaKuse23L57clx4bhPqXmtGgtPWw9YDA=="/>
 </item></channel></rss>
