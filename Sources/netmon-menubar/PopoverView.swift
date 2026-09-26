@@ -1,38 +1,15 @@
 import NetmonCore
 import SwiftUI
 
-private struct PopoverTheme {
-    let ink, sub, tile, bar, axis, threshold, normal, orange, orangeText, red, green, blue: Color
-
-    init(dark: Bool) {
-        func hex(_ value: UInt32, _ opacity: Double = 1) -> Color {
-            Color(.sRGB, red: Double(value >> 16 & 0xff) / 255, green: Double(value >> 8 & 0xff) / 255, blue: Double(value & 0xff) / 255, opacity: opacity)
-        }
-        ink = hex(dark ? 0xF5F5F7 : 0x1D1D1F)
-        sub = hex(dark ? 0xA1A1A6 : 0x5E5E63)
-        tile = dark ? hex(0xFFFFFF, 0.06) : hex(0x000000, 0.045)
-        bar = hex(dark ? 0xF5F5F7 : 0x1D1D1F, dark ? 0.42 : 0.34)
-        axis = hex(dark ? 0xF5F5F7 : 0x1D1D1F, 0.25)
-        threshold = dark ? hex(0xFF9F0A, 0.8) : hex(0xC25E00, 0.8)
-        normal = dark ? hex(0x32D74B, 0.10) : hex(0x1E8E3E, 0.10)
-        orange = hex(dark ? 0xFF9F0A : 0xE27100)
-        orangeText = hex(dark ? 0xFFA826 : 0xA34A00)
-        red = hex(dark ? 0xFF5A50 : 0xC8161E)
-        green = hex(dark ? 0x32D74B : 0x1E8E3E)
-        blue = hex(dark ? 0x0A84FF : 0x0071E3)
-    }
-}
-
 struct PopoverView: View {
     @ObservedObject var model: MonitorModel
     @ObservedObject var updateAvailability: UpdateAvailability
     @Environment(\.colorScheme) private var colorScheme
 
-    private static let chartMaximum: Double = 2_500
     private static let mono = Font.system(size: 14, weight: .semibold, design: .monospaced)
 
     var body: some View {
-        let theme = PopoverTheme(dark: colorScheme == .dark)
+        let theme = NofiTheme(dark: colorScheme == .dark)
         // The popover spans the full 5-minute buffer, so its numbers do too.
         let stats = WindowStats(samples: model.samples)
         VStack(alignment: .leading, spacing: 14) {
@@ -47,13 +24,9 @@ struct PopoverView: View {
         .foregroundColor(theme.ink)
     }
 
-    private func header(theme: PopoverTheme, stats: WindowStats) -> some View {
-        let (name, color): (LocalizedStringKey, Color) = switch model.state.mode {
-        case .fine: ("Fine", theme.green)
-        case .congested: ("Congested", theme.orange)
-        case .gatewayOnly: ("Gateway only", theme.orange)
-        case .dead: ("Dead", theme.red)
-        }
+    private func header(theme: NofiTheme, stats: WindowStats) -> some View {
+        let name = WidgetContentView.name(model.state.mode)
+        let color = theme.stateColor(model.state.mode)
         return VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Circle().fill(color).frame(width: 8, height: 8)
@@ -69,37 +42,13 @@ struct PopoverView: View {
         }
     }
 
-    private func chart(theme: PopoverTheme) -> some View {
-        let buckets = ChartBucket.buckets(samples: model.samples)
-        let plotTop: CGFloat = 8
-        let plotHeight: CGFloat = 100
-        func y(_ milliseconds: Double) -> CGFloat {
-            plotTop + plotHeight - CGFloat(min(milliseconds, Self.chartMaximum) / Self.chartMaximum) * plotHeight
-        }
+    private func chart(theme: NofiTheme) -> some View {
+        func y(_ milliseconds: Double) -> CGFloat { LatencyChart.y(milliseconds, height: 112) }
         return VStack(spacing: 2) {
             HStack(spacing: 6) {
-                Canvas { context, size in
-                    context.fill(Path(CGRect(x: 0, y: y(Thresholds.normalMilliseconds), width: size.width, height: y(0) - y(Thresholds.normalMilliseconds))), with: .color(theme.normal))
-                    let slot = size.width / CGFloat(buckets.count)
-                    for (index, bucket) in buckets.enumerated() {
-                        guard let bucket else { continue }
-                        let x = CGFloat(index) * slot
-                        if let worst = bucket.worstMilliseconds {
-                            let color = worst > Thresholds.lateMilliseconds ? theme.orange : theme.bar
-                            context.fill(Path(CGRect(x: x, y: y(worst), width: slot - 1, height: y(0) - y(worst))), with: .color(color))
-                        }
-                        if bucket.hasLoss {
-                            context.fill(Path(CGRect(x: x, y: 0, width: slot - 1, height: 2)), with: .color(bucket.hasOutage ? theme.red : theme.orange))
-                        }
-                    }
-                    context.fill(Path(CGRect(x: 0, y: y(0), width: size.width, height: 1)), with: .color(theme.axis))
-                    var limit = Path()
-                    limit.move(to: CGPoint(x: 0, y: y(Thresholds.lateMilliseconds)))
-                    limit.addLine(to: CGPoint(x: size.width, y: y(Thresholds.lateMilliseconds)))
-                    context.stroke(limit, with: .color(theme.threshold), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
-                }
+                LatencyChartCanvas(samples: model.samples, theme: theme)
                 ZStack(alignment: .topLeading) {
-                    Text(Formatting.milliseconds(Self.chartMaximum)).offset(y: 3)
+                    Text(Formatting.milliseconds(LatencyChart.maximum)).offset(y: 3)
                     Text("1s limit").foregroundColor(theme.orangeText).offset(y: y(Thresholds.lateMilliseconds) - 6)
                     Text("0").offset(y: y(0) - 12)
                 }
@@ -120,7 +69,7 @@ struct PopoverView: View {
         }
     }
 
-    private func tiles(theme: PopoverTheme, stats: WindowStats) -> some View {
+    private func tiles(theme: NofiTheme, stats: WindowStats) -> some View {
         func latencyColor(_ value: Double?) -> Color {
             (value ?? 0) > Thresholds.normalMilliseconds ? theme.orangeText : theme.ink
         }
@@ -143,7 +92,7 @@ struct PopoverView: View {
         }
     }
 
-    private func pathSplit(theme: PopoverTheme, stats: WindowStats) -> some View {
+    private func pathSplit(theme: NofiTheme, stats: WindowStats) -> some View {
         let router = stats.gatewayP50Milliseconds
         let upstream = zip(stats.p50Milliseconds, router).map { max(0, $0 - $1) }
         func row(_ title: LocalizedStringKey, _ value: String, bad: Bool) -> some View {
@@ -162,7 +111,7 @@ struct PopoverView: View {
         .background(RoundedRectangle(cornerRadius: 8).fill(theme.tile))
     }
 
-    private func footer(theme: PopoverTheme) -> some View {
+    private func footer(theme: NofiTheme) -> some View {
         VStack(spacing: 10) {
             Divider()
             HStack {

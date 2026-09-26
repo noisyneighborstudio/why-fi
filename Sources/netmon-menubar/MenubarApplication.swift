@@ -3,6 +3,7 @@ import Combine
 import NetmonCore
 import Sparkle
 import SwiftUI
+import WidgetKit
 
 @MainActor
 final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
@@ -114,6 +115,27 @@ final class UpdateAvailability: NSObject, ObservableObject, SPUStandardUserDrive
     }
 }
 
+/// Hands the widget a snapshot and asks WidgetKit to reload, within its refresh budget.
+final class WidgetPublisher {
+    private let store: SnapshotStore
+    private var policy = WidgetRefreshPolicy()
+
+    init?() {
+        guard let store = SnapshotStore() else { return nil }
+        self.store = store
+    }
+
+    func publish(samples: [NetworkSample], state: MonitorState) {
+        guard state.hasData, policy.shouldPublish(mode: state.mode, now: .now) else { return }
+        do {
+            try store.write(WidgetSnapshot(capturedAt: .now, mode: state.mode, samples: samples))
+            WidgetCenter.shared.reloadTimelines(ofKind: NofiWidget.kind)
+        } catch {
+            NSLog("nofi: widget snapshot write failed: %@", String(describing: error))
+        }
+    }
+}
+
 /// State shared by the status item and the popover. Main thread only.
 final class MonitorModel: ObservableObject {
     private static let displayModeKey = "displayMode"
@@ -129,6 +151,7 @@ final class MonitorModel: ObservableObject {
     }
     var onChange: (() -> Void)?
 
+    private let widgets = WidgetPublisher()
     private var buffer = SampleRingBuffer(capacity: 300)
     private var latestSequence = 0
     private var gatewayReachable: Bool?
@@ -150,6 +173,7 @@ final class MonitorModel: ObservableObject {
         }
         samples = buffer.samples
         state = MonitorState.evaluate(samples: Array(samples.suffix(60)), gatewayReachable: gatewayReachable)
+        widgets?.publish(samples: samples, state: state)
         onChange?()
     }
 }

@@ -1,8 +1,10 @@
 import AppKit
 import Foundation
 import NetmonCore
+import SwiftUI
 
 /// `--render-fixture <state> --out <png> [--appearance light|dark] [--mode auto|compact|expanded]`
+/// `[--widget small|medium [--stale]]` renders the widget instead of the menu bar item.
 struct FixtureRequest {
     enum Fixture: String {
         case fine
@@ -27,6 +29,8 @@ struct FixtureRequest {
     let outputURL: URL
     let dark: Bool
     let displayMode: DisplayMode
+    let widget: WidgetLayout?
+    let stale: Bool
 
     init(arguments: [String]) throws {
         func value(_ flag: String) -> String? {
@@ -43,14 +47,47 @@ struct FixtureRequest {
         self.outputURL = URL(fileURLWithPath: output)
         self.dark = appearance == "dark"
         self.displayMode = displayMode
+        switch value("--widget") {
+        case nil: widget = nil
+        case "small": widget = .small
+        case "medium": widget = .medium
+        case let other?: throw RequestError.invalid("widget", other)
+        }
+        stale = arguments.contains("--stale")
     }
 
     func render() throws {
+        if let widget { return try MainActor.assumeIsolated { try renderWidget(widget) } }
         let samples = Self.samples(for: fixture)
         let state = MonitorState.evaluate(samples: samples, gatewayReachable: fixture == .gatewayOnly)
         let image = StatusRenderer.image(samples: samples, state: state, reveal: displayMode.isExpanded(for: state.mode) ? 1 : 0, dark: dark)
         guard let bitmap = image.representations.first as? NSBitmapImageRep,
               let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw RequestError.invalid("render", fixture.rawValue)
+        }
+        try data.write(to: outputURL, options: .atomic)
+    }
+
+    @MainActor
+    private func renderWidget(_ layout: WidgetLayout) throws {
+        // Five minutes of history: repeat the steady patterns; put healthy history before outages.
+        let base = Self.samples(for: fixture)
+        let samples = fixture == .dead || fixture == .gatewayOnly
+            ? Array(repeating: base[0], count: 300 - base.count) + base
+            : Array((0..<5).flatMap { _ in base })
+        let state = MonitorState.evaluate(samples: Array(samples.suffix(60)), gatewayReachable: fixture == .gatewayOnly)
+        let snapshot = WidgetSnapshot(capturedAt: Date().addingTimeInterval(stale ? -3_600 : -120), mode: state.mode, samples: samples)
+        let size = layout == .small ? CGSize(width: 170, height: 170) : CGSize(width: 364, height: 170)
+        let view = WidgetContentView(snapshot: snapshot, isStale: stale, layout: layout, theme: NofiTheme(dark: dark))
+            .padding(16)
+            .frame(width: size.width, height: size.height)
+            .background(dark ? Color(white: 0.16) : Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .environment(\.colorScheme, dark ? .dark : .light)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+              let data = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
             throw RequestError.invalid("render", fixture.rawValue)
         }
         try data.write(to: outputURL, options: .atomic)

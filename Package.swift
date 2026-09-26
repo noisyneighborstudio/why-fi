@@ -26,6 +26,14 @@ let package = Package(
             ],
             path: "Sources/netmon-menubar"
         ),
+        .executableTarget(
+            name: "nofi-widgets",
+            dependencies: ["NetmonCore"],
+            path: "Sources/nofi-widgets",
+            // App extensions start in Foundation's NSExtensionMain, which sets up ExtensionKit
+            // and then calls the widget bundle's main. Xcode passes this for extension targets.
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-e", "-Xlinker", "_NSExtensionMain"])]
+        ),
         .testTarget(
             name: "NetmonCoreTests",
             dependencies: ["NetmonCore"],

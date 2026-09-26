@@ -37,6 +37,20 @@ account `whyfi`, the app's former name (`generate_keys --account whyfi`); its pu
 
 Key material stays in runner-temporary files or stdin and is removed in an `always()` step.
 
+### Widgets
+
+`nofi-widgets` is a WidgetKit extension that `scripts/build-app.sh` packages as
+`Contents/PlugIns/NofiWidgets.appex`. The app writes a snapshot of the last five minutes to the
+app group `P8ZBH5878Q.studio.noisyneighbor.nofi` and asks WidgetKit to reload on state changes
+(at most once a minute) and otherwise every five minutes. The widget shows "No recent data" ten
+minutes after the last snapshot.
+
+The app group needs the Developer ID provisioning profiles in `Resources/profiles` (bundle IDs
+`studio.noisyneighbor.nofi` and `.widgets`, App Groups capability, certificate
+`Developer ID Application: Seth Webster (P8ZBH5878Q)`). Without them macOS treats the entitlement
+as unapproved and WidgetKit ignores the app. Ad-hoc builds skip the group, so their widget shows
+"No recent data". Profiles tie to the signing certificate, so regenerate them when it's renewed.
+
 ### Local builds
 
 `scripts/build-app.sh --version V --build N --feed-url URL --ed-public-key KEY --sign-identity ID`
