@@ -125,8 +125,10 @@ public struct WidgetContentView: View {
                 Text(Self.name(state.mode)).font(.system(size: 13, weight: .semibold)).foregroundColor(theme.ink)
             }
             Spacer(minLength: 4)
-            headline(state)
-            Text(detail(state)).font(.system(size: 11)).foregroundColor(theme.sub).lineLimit(1)
+            headline(snapshot)
+            ForEach(detail(snapshot), id: \.self) { line in
+                Text(line).font(.system(size: 11)).foregroundColor(theme.sub).lineLimit(1)
+            }
             Spacer(minLength: 4)
             (Text("Updated ") + Text(snapshot.capturedAt, style: .time))
                 .font(.system(size: 10))
@@ -160,13 +162,16 @@ public struct WidgetContentView: View {
         }
     }
 
-    private func headline(_ state: MonitorState) -> some View {
+    /// The number covers the whole snapshot, not the instant of capture: the widget lags by
+    /// design, so it reports a window it can stand behind and says how long that window is.
+    private func headline(_ snapshot: WidgetSnapshot) -> some View {
+        let state = snapshot.state
         let (text, color): (String, Color)
         switch state.mode {
         case .dead: (text, color) = (Formatting.duration(state.outageSeconds), theme.red)
         case .gatewayOnly: (text, color) = (String(localized: "LAN only"), theme.orangeText)
         case .fine, .congested:
-            let median = state.stats.p50Milliseconds
+            let median = snapshot.stats.p50Milliseconds
             (text, color) = (Formatting.milliseconds(median), (median ?? 0) > Thresholds.normalMilliseconds ? theme.orangeText : theme.ink)
         }
         return Text(text)
@@ -176,14 +181,17 @@ public struct WidgetContentView: View {
             .minimumScaleFactor(0.6)
     }
 
-    private func detail(_ state: MonitorState) -> String {
+    private func detail(_ snapshot: WidgetSnapshot) -> [String] {
+        let state = snapshot.state
         switch state.mode {
-        case .dead: return String(localized: "no replies")
-        case .gatewayOnly: return String(localized: "router answers")
+        case .dead: return [String(localized: "no replies")]
+        case .gatewayOnly: return [String(localized: "router answers")]
         case .fine, .congested:
-            return state.stats.lossCount == 0
-                ? String(localized: "median, no loss")
-                : String(format: String(localized: "median, %.1f%% loss"), state.stats.lossPercent)
+            let stats = snapshot.stats
+            return [
+                String(localized: "median, last \(snapshot.windowMinutes) min"),
+                stats.lossCount == 0 ? String(localized: "no loss") : String(format: String(localized: "%.1f%% loss"), stats.lossPercent)
+            ]
         }
     }
 

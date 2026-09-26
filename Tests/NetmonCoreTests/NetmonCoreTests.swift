@@ -159,16 +159,20 @@ final class NetmonCoreTests: XCTestCase {
         XCTAssertEqual(widths[1] * 2, (widths[1] * 2).rounded())
     }
 
-    func testWidgetRefreshesOnStateChangesAtMostOncePerMinuteAndOtherwiseEveryFiveMinutes() {
+    func testWidgetPublishesBadNewsAtOnceRecoveriesAtMostPerMinuteAndSteadyEveryThirtyMinutes() {
         var policy = WidgetRefreshPolicy()
         let start = Date(timeIntervalSince1970: 0)
-        XCTAssertTrue(policy.shouldPublish(mode: .fine, now: start))
-        XCTAssertFalse(policy.shouldPublish(mode: .fine, now: start.addingTimeInterval(299)))
-        // A state change inside the first minute waits, so flapping can't drain the budget.
-        XCTAssertFalse(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(30)))
-        XCTAssertTrue(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(60)))
-        XCTAssertFalse(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(300)))
-        XCTAssertTrue(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(360)))
+        func at(_ seconds: TimeInterval) -> Date { start.addingTimeInterval(seconds) }
+        XCTAssertTrue(policy.shouldPublish(mode: .fine, now: at(0)))
+        XCTAssertFalse(policy.shouldPublish(mode: .fine, now: at(1_799)))
+        // Getting worse skips every wait, even seconds after the last publish.
+        XCTAssertTrue(policy.shouldPublish(mode: .congested, now: at(1_800 - 5)))
+        XCTAssertTrue(policy.shouldPublish(mode: .dead, now: at(1_800)))
+        // Recovering waits out the minute, so flapping can't drain the budget.
+        XCTAssertFalse(policy.shouldPublish(mode: .fine, now: at(1_830)))
+        XCTAssertTrue(policy.shouldPublish(mode: .fine, now: at(1_860)))
+        XCTAssertFalse(policy.shouldPublish(mode: .fine, now: at(3_600)))
+        XCTAssertTrue(policy.shouldPublish(mode: .fine, now: at(3_660)))
     }
 
     func testSnapshotRoundTripsThroughTheStoreAndGoesStale() throws {
@@ -179,7 +183,8 @@ final class NetmonCoreTests: XCTestCase {
                                       samples: [.ok(40, gateway: 3), .late(1_450), .lost, .lost(gateway: 4)])
         try store.write(snapshot)
         XCTAssertEqual(store.read(), snapshot)
-        XCTAssertEqual(snapshot.staleAt, Date(timeIntervalSince1970: 1_600))
+        XCTAssertEqual(snapshot.staleAt, Date(timeIntervalSince1970: 1_000 + 3_600))
+        XCTAssertEqual(snapshot.windowMinutes, 1)
         XCTAssertNil(SnapshotStore(url: url.appendingPathExtension("missing")).read())
     }
 
