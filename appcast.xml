@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
-<channel><title>WhyFi Updates</title><item>
-<title>WhyFi 1.1.0</title><pubDate>Sat, 26 Sep 2026 04:55:09 +0000</pubDate>
+<channel><title>nofi Updates</title><item>
+<title>nofi 2.0.0</title><pubDate>Sat, 26 Sep 2026 14:25:57 +0000</pubDate>
+<link>https://github.com/noisyneighborstudio/nofi/releases/latest</link>
 <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-<enclosure url="https://github.com/noisyneighborstudio/why-fi/releases/download/v1.1.0/WhyFi-1.1.0.zip" sparkle:version="2" sparkle:shortVersionString="1.1.0" length="1199695" type="application/octet-stream" sparkle:edSignature="HOhM2FlRA3BXARZRvQcLMbzQvywYAigFdl84lhSaPQzAr/l05AAq/iksnkvXY0PWN8JaiPs6lL3O6ta3mJXqCQ=="/>
+<sparkle:informationalUpdate><sparkle:belowVersion>3</sparkle:belowVersion></sparkle:informationalUpdate>
+<enclosure url="https://github.com/noisyneighborstudio/nofi/releases/download/v2.0.0/nofi-2.0.0.zip" sparkle:version="3" sparkle:shortVersionString="2.0.0" length="1199377" type="application/octet-stream" sparkle:edSignature="3ETfZSHAZqwn76AIKpyPgBo3LhbAJp9a/Q4rYJFFCkl8f7J4MV/fNknAH1NPnnXO4EPAI0QC22l0p1YSOieyCg=="/>
 </item></channel></rss>
