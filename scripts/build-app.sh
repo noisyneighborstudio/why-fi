@@ -86,6 +86,16 @@ trap cleanup EXIT
 /usr/bin/ditto "$APP_EXECUTABLE" "$APP_DIR/Contents/MacOS/netmon-menubar"
 /usr/bin/ditto "$SPARKLE_SOURCE" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 
+# App icon: a multi-resolution icns from the committed 1024 tile (scripts/make-icon.swift).
+ICONSET="$(mktemp -d /private/tmp/nofi-icon.XXXXXX)/nofi.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+    /usr/bin/sips -z "$size" "$size" "$ROOT_DIR/Resources/nofi.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    /usr/bin/sips -z $((size * 2)) $((size * 2)) "$ROOT_DIR/Resources/nofi.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+/usr/bin/iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/nofi.icns"
+rm -rf "$(dirname "$ICONSET")"
+
 INFO_PLIST="$APP_DIR/Contents/Info.plist"
 cat > "$INFO_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -94,6 +104,8 @@ cat > "$INFO_PLIST" <<'PLIST'
 <dict>
     <key>CFBundleIdentifier</key>
     <string>studio.noisyneighbor.nofi</string>
+    <key>CFBundleIconFile</key>
+    <string>nofi</string>
     <key>CFBundleName</key>
     <string>nofi</string>
     <key>CFBundleDisplayName</key>
