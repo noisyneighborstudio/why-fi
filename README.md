@@ -1,10 +1,10 @@
-# WhyFi
+# nofi
 
-WhyFi is a macOS 14+ menu bar network monitor. The executable target is `netmon-menubar`; the shared monitoring code lives in `NetmonCore`.
+nofi is a macOS 14+ menu bar network monitor. The executable target is `netmon-menubar`; the shared monitoring code lives in `NetmonCore`.
 
 ## Releasing
 
-WhyFi updates itself with Sparkle 2. Every push to `main` runs `.github/workflows/release.yml`:
+nofi updates itself with Sparkle 2. Every push to `main` runs `.github/workflows/release.yml`:
 `swift test`, then semantic-release. semantic-release reads conventional commits (`feat:` minor,
 `fix:` patch, `!` or `BREAKING CHANGE:` major), tags the repo, and creates the GitHub release. A
 push with no releasable commits publishes nothing.
@@ -13,15 +13,15 @@ push with no releasable commits publishes nothing.
   workflow run number, which only increases; Sparkle orders updates by it.
 - **Build.** `scripts/release-prepare.sh` runs `scripts/build-app.sh` with the Developer ID
   identity, checks the signature and every framework dependency, notarizes and staples when the
-  notary secrets exist, and zips `WhyFi-<version>.zip`.
+  notary secrets exist, and zips `nofi-<version>.zip`.
 - **Publish.** `scripts/publish-appcast.sh` signs the zip with the Sparkle EdDSA key, checks the
   signature against the `SUPublicEDKey` baked into the app, uploads the zip to the release, waits
   until GitHub serves it, then commits `appcast.xml` to the `appcasts` branch.
 
 `updates.env` is the one place hosting is configured. The feed is
-`https://raw.githubusercontent.com/noisyneighborstudio/why-fi/appcasts/appcast.xml`, and both it
+`https://raw.githubusercontent.com/noisyneighborstudio/nofi/appcasts/appcast.xml`, and both it
 and the release zips must be readable without credentials. The Sparkle key is the login-keychain
-account `whyfi` (`generate_keys --account whyfi`); its public half is `SPARKLE_PUBLIC_KEY` in
+account `whyfi`, the app's former name (`generate_keys --account whyfi`); its public half is `SPARKLE_PUBLIC_KEY` in
 `updates.env`.
 
 ### Repo secrets
@@ -40,4 +40,4 @@ Key material stays in runner-temporary files or stdin and is removed in an `alwa
 ### Local builds
 
 `scripts/build-app.sh --version V --build N --feed-url URL --ed-public-key KEY --sign-identity ID`
-builds `dist/WhyFi.app`. Pass `-` as the identity for an ad-hoc build.
+builds `dist/nofi.app`. Pass `-` as the identity for an ad-hoc build.
