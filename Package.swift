@@ -26,6 +26,11 @@ let package = Package(
             ],
             path: "Sources/netmon-menubar"
         ),
+        .executableTarget(
+            name: "nofi-widgets",
+            dependencies: ["NetmonCore"],
+            path: "Sources/nofi-widgets"
+        ),
         .testTarget(
             name: "NetmonCoreTests",
             dependencies: ["NetmonCore"],

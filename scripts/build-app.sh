@@ -67,18 +67,20 @@ BIN_PATH="$(
     swift build -c release --disable-sandbox --scratch-path "$SCRATCH_PATH" --show-bin-path
 )"
 APP_EXECUTABLE="$BIN_PATH/netmon-menubar"
+WIDGET_EXECUTABLE="$BIN_PATH/nofi-widgets"
 SPARKLE_SOURCE="$BIN_PATH/Sparkle.framework"
 
 [[ -x "$APP_EXECUTABLE" ]] || fail "release executable was not produced at $APP_EXECUTABLE"
 [[ -d "$SPARKLE_SOURCE" ]] || fail "Sparkle.framework was not produced at $SPARKLE_SOURCE"
+[[ -x "$WIDGET_EXECUTABLE" ]] || fail "widget executable was not produced at $WIDGET_EXECUTABLE"
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources"
 
-ADHOC_ENTITLEMENTS=""
+ENTITLEMENTS_DIR=""
 cleanup() {
-    if [[ -n "$ADHOC_ENTITLEMENTS" ]]; then
-        rm -f "$ADHOC_ENTITLEMENTS"
+    if [[ -n "$ENTITLEMENTS_DIR" ]]; then
+        rm -rf "$ENTITLEMENTS_DIR"
     fi
 }
 trap cleanup EXIT
@@ -143,6 +145,44 @@ PLIST
 /usr/bin/plutil -replace SUFeedURL -string "$FEED_URL" "$INFO_PLIST"
 /usr/bin/plutil -replace SUPublicEDKey -string "$ED_PUBLIC_KEY" "$INFO_PLIST"
 
+# Widget extension: WidgetKit loads it from PlugIns; its version must match the app's.
+WIDGET_DIR="$APP_DIR/Contents/PlugIns/NofiWidgets.appex"
+mkdir -p "$WIDGET_DIR/Contents/MacOS"
+/usr/bin/ditto "$WIDGET_EXECUTABLE" "$WIDGET_DIR/Contents/MacOS/nofi-widgets"
+cat > "$WIDGET_DIR/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>studio.noisyneighbor.nofi.widgets</string>
+    <key>CFBundleName</key>
+    <string>NofiWidgets</string>
+    <key>CFBundleDisplayName</key>
+    <string>nofi</string>
+    <key>CFBundleExecutable</key>
+    <string>nofi-widgets</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0</string>
+    <key>CFBundleVersion</key>
+    <string>0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.widgetkit-extension</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+/usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION" "$WIDGET_DIR/Contents/Info.plist"
+/usr/bin/plutil -replace CFBundleVersion -string "$BUILD" "$WIDGET_DIR/Contents/Info.plist"
+
 APP_EXECUTABLE="$APP_DIR/Contents/MacOS/netmon-menubar"
 if ! /usr/bin/otool -l "$APP_EXECUTABLE" | /usr/bin/grep -Fq '@loader_path/../Frameworks'; then
     /usr/bin/install_name_tool -add_rpath '@loader_path/../Frameworks' "$APP_EXECUTABLE"
@@ -170,21 +210,35 @@ done
 sign_code "$SPARKLE_FRAMEWORK/Versions/B/Autoupdate"
 sign_code "$SPARKLE_FRAMEWORK/Versions/B/Updater.app"
 sign_code "$SPARKLE_FRAMEWORK"
+# Entitlements. The widget runs sandboxed and reads the app's snapshot from a shared app group.
+# The team-prefixed group needs a team: an ad-hoc signature has none, so ad-hoc builds skip it
+# and their widget shows "No recent data". Ad-hoc hardened-runtime builds also need library
+# validation off to load the ad-hoc-signed Sparkle.
+ENTITLEMENTS_DIR="$(mktemp -d /private/tmp/nofi-entitlements.XXXXXX)"
+entitlements() {
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n'
+    for key in "$@"; do
+        case "$key" in
+            sandbox) printf '    <key>com.apple.security.app-sandbox</key>\n    <true/>\n' ;;
+            group) printf '    <key>com.apple.security.application-groups</key>\n    <array>\n        <string>P8ZBH5878Q.studio.noisyneighbor.nofi</string>\n    </array>\n' ;;
+            app-id=*) printf '    <key>com.apple.application-identifier</key>\n    <string>P8ZBH5878Q.%s</string>\n    <key>com.apple.developer.team-identifier</key>\n    <string>P8ZBH5878Q</string>\n' "${key#app-id=}" ;;
+            library) printf '    <key>com.apple.security.cs.disable-library-validation</key>\n    <true/>\n' ;;
+        esac
+    done
+    printf '</dict>\n</plist>\n'
+}
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
-    ADHOC_ENTITLEMENTS="$(mktemp /private/tmp/nofi-entitlements.XXXXXX)"
-    cat > "$ADHOC_ENTITLEMENTS" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-</dict>
-</plist>
-PLIST
-    /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --options runtime --entitlements "$ADHOC_ENTITLEMENTS" "$APP_DIR"
+    entitlements sandbox > "$ENTITLEMENTS_DIR/widget.plist"
+    entitlements library > "$ENTITLEMENTS_DIR/app.plist"
 else
-    sign_code "$APP_DIR"
+    # Developer ID profiles (Resources/profiles) authorize the app group; without them macOS
+    # treats the entitlement as unapproved and WidgetKit ignores the app.
+    entitlements sandbox group app-id=studio.noisyneighbor.nofi.widgets > "$ENTITLEMENTS_DIR/widget.plist"
+    entitlements group app-id=studio.noisyneighbor.nofi > "$ENTITLEMENTS_DIR/app.plist"
+    /usr/bin/ditto "$ROOT_DIR/Resources/profiles/studio.noisyneighbor.nofi.widgets.provisionprofile" "$WIDGET_DIR/Contents/embedded.provisionprofile"
+    /usr/bin/ditto "$ROOT_DIR/Resources/profiles/studio.noisyneighbor.nofi.provisionprofile" "$APP_DIR/Contents/embedded.provisionprofile"
 fi
+/usr/bin/codesign --force --sign "$SIGN_IDENTITY" --options runtime ${TIMESTAMP[@]+"${TIMESTAMP[@]}"} --entitlements "$ENTITLEMENTS_DIR/widget.plist" "$WIDGET_DIR"
+/usr/bin/codesign --force --sign "$SIGN_IDENTITY" --options runtime ${TIMESTAMP[@]+"${TIMESTAMP[@]}"} --entitlements "$ENTITLEMENTS_DIR/app.plist" "$APP_DIR"
 
 printf 'Built %s\n' "$APP_DIR"

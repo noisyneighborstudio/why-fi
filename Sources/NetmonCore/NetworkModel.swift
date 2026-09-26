@@ -7,7 +7,7 @@ public enum SampleOutcome: String, CaseIterable, Codable, Sendable {
 }
 
 /// One probe slot: the internet reply, and the gateway reply sent in the same slot.
-public struct NetworkSample: Equatable, Sendable {
+public struct NetworkSample: Equatable, Codable, Sendable {
     public let rttMilliseconds: Double?
     public let outcome: SampleOutcome
     public let gatewayMilliseconds: Double?
@@ -90,11 +90,16 @@ public enum RTTScale {
     public static let thresholdHeight: CGFloat = 8
 
     public static func barHeight(milliseconds: Double) -> CGFloat {
+        max(1, (CGFloat(fraction(milliseconds: milliseconds)) * height * 2).rounded() / 2)
+    }
+
+    /// Position on the same scale as a fraction of full height, 0 to 1.
+    public static func fraction(milliseconds: Double) -> Double {
         let late = Thresholds.lateMilliseconds
-        let raw = milliseconds <= late
-            ? log10(max(milliseconds, 2) / 2) / log10(late / 2) * Double(thresholdHeight)
-            : Double(thresholdHeight) + log10(min(milliseconds, 3_000) / late) / log10(3) * Double(height - thresholdHeight)
-        return max(1, (CGFloat(raw) * 2).rounded() / 2)
+        let threshold = Double(thresholdHeight / height)
+        return milliseconds <= late
+            ? log10(max(milliseconds, 2) / 2) / log10(late / 2) * threshold
+            : threshold + log10(min(milliseconds, 3_000) / late) / log10(3) * (1 - threshold)
     }
 }
 
@@ -169,7 +174,7 @@ public struct WindowStats: Equatable, Sendable {
     }
 }
 
-public enum MonitorMode: String, CaseIterable, Sendable {
+public enum MonitorMode: String, CaseIterable, Codable, Sendable {
     case fine
     case congested
     case gatewayOnly = "gateway-only"

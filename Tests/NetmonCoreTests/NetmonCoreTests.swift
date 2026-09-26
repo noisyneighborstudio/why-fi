@@ -159,6 +159,38 @@ final class NetmonCoreTests: XCTestCase {
         XCTAssertEqual(widths[1] * 2, (widths[1] * 2).rounded())
     }
 
+    func testWidgetRefreshesOnStateChangesAtMostOncePerMinuteAndOtherwiseEveryFiveMinutes() {
+        var policy = WidgetRefreshPolicy()
+        let start = Date(timeIntervalSince1970: 0)
+        XCTAssertTrue(policy.shouldPublish(mode: .fine, now: start))
+        XCTAssertFalse(policy.shouldPublish(mode: .fine, now: start.addingTimeInterval(299)))
+        // A state change inside the first minute waits, so flapping can't drain the budget.
+        XCTAssertFalse(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(30)))
+        XCTAssertTrue(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(60)))
+        XCTAssertFalse(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(300)))
+        XCTAssertTrue(policy.shouldPublish(mode: .congested, now: start.addingTimeInterval(360)))
+    }
+
+    func testSnapshotRoundTripsThroughTheStoreAndGoesStale() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nofi-snapshot-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = SnapshotStore(url: url)
+        let snapshot = WidgetSnapshot(capturedAt: Date(timeIntervalSince1970: 1_000), mode: .congested,
+                                      samples: [.ok(40, gateway: 3), .late(1_450), .lost, .lost(gateway: 4)])
+        try store.write(snapshot)
+        XCTAssertEqual(store.read(), snapshot)
+        XCTAssertEqual(snapshot.staleAt, Date(timeIntervalSince1970: 1_600))
+        XCTAssertNil(SnapshotStore(url: url.appendingPathExtension("missing")).read())
+    }
+
+    func testLogScaleFractionIsContinuousAndPinsTheThreshold() {
+        let threshold = Double(RTTScale.thresholdHeight / RTTScale.height)
+        XCTAssertEqual(RTTScale.fraction(milliseconds: Thresholds.lateMilliseconds), threshold, accuracy: 1e-9)
+        XCTAssertEqual(RTTScale.fraction(milliseconds: 1_000.001), threshold, accuracy: 1e-5)
+        XCTAssertEqual(RTTScale.fraction(milliseconds: 3_000), 1, accuracy: 1e-9)
+        XCTAssertGreaterThan(RTTScale.fraction(milliseconds: 19), 0.1)
+    }
+
     func testRingBufferKeepsOldestToNewestOrder() {
         var buffer = SampleRingBuffer(capacity: 3)
         [.ok(10), .ok(20), .ok(30), .ok(40)].forEach { buffer.append($0) }
