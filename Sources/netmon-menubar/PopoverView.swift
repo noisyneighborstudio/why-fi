@@ -2,7 +2,7 @@ import NetmonCore
 import SwiftUI
 
 private struct PopoverTheme {
-    let ink, sub, tile, bar, axis, threshold, normal, orange, orangeText, red, green: Color
+    let ink, sub, tile, bar, axis, threshold, normal, orange, orangeText, red, green, blue: Color
 
     init(dark: Bool) {
         func hex(_ value: UInt32, _ opacity: Double = 1) -> Color {
@@ -19,6 +19,7 @@ private struct PopoverTheme {
         orangeText = hex(dark ? 0xFFA826 : 0xA34A00)
         red = hex(dark ? 0xFF5A50 : 0xC8161E)
         green = hex(dark ? 0x32D74B : 0x1E8E3E)
+        blue = hex(dark ? 0x0A84FF : 0x0071E3)
     }
 }
 
@@ -181,9 +182,15 @@ struct PopoverView: View {
                     updateAvailability.checkForUpdates()
                 } label: {
                     HStack {
-                        Text("Check for Updates…")
+                        if let version = updateAvailability.pendingVersion {
+                            Circle().fill(theme.blue).frame(width: 6, height: 6)
+                            Text("Update to \(version) available")
+                                .foregroundColor(theme.blue)
+                        } else {
+                            Text("Check for Updates…")
+                        }
                         Spacer()
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: updateAvailability.pendingVersion == nil ? "arrow.clockwise" : "arrow.down.circle")
                     }
                     .font(.system(size: 12))
                     .foregroundColor(updateAvailability.canCheckForUpdates ? theme.sub : theme.sub.opacity(0.5))

@@ -2,7 +2,7 @@ import AppKit
 
 /// Menu bar colors. Resolved from the status button's appearance, not the app's.
 public struct StatusPalette {
-    public let fg, bar, grid, orange, orangeText, red, green: NSColor
+    public let fg, bar, grid, orange, orangeText, red, green, blue: NSColor
 
     public init(dark: Bool) {
         func hex(_ value: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -16,6 +16,7 @@ public struct StatusPalette {
         orangeText = hex(dark ? 0xFFA826 : 0xA34A00)
         red = hex(dark ? 0xFF5A50 : 0xC8161E)
         green = hex(dark ? 0x32D74B : 0x1E8E3E)
+        blue = hex(dark ? 0x0A84FF : 0x0071E3)
     }
 }
 
@@ -32,7 +33,8 @@ public enum StatusRenderer {
 
     /// `reveal` runs from 0 (icon only) to 1 (graph and label); in between, the item is
     /// partway wide, the graph and label fade in as they are uncovered, and the glyph crossfades.
-    public static func image(samples: [NetworkSample], state: MonitorState, reveal: CGFloat, dark: Bool, scale: CGFloat = 2) -> NSImage {
+    /// `updateAvailable` adds a blue dot above the state dot when Sparkle is holding back an update reminder.
+    public static func image(samples: [NetworkSample], state: MonitorState, reveal: CGFloat, dark: Bool, updateAvailable: Bool = false, scale: CGFloat = 2) -> NSImage {
         let palette = StatusPalette(dark: dark)
         let reveal = min(max(reveal, 0), 1)
         let label = labelText(state: state, palette: palette)
@@ -76,6 +78,11 @@ public enum StatusRenderer {
             drawSparkline(in: context, samples: Array(samples.suffix(columns)), palette: palette)
             let labelSize = label.size()
             label.draw(at: CGPoint(x: sparklineX + sparklineWidth + gap, y: ((height - labelSize.height) / 2).rounded()))
+        }
+        if updateAvailable {
+            // Outside the crossfade so the reminder never dims mid-animation.
+            context.setFillColor(palette.blue.cgColor)
+            context.fillEllipse(in: CGRect(x: padding + 15.5 - 2, y: (height - 14) / 2 + 2 - 2, width: 4, height: 4))
         }
         NSGraphicsContext.restoreGraphicsState()
 

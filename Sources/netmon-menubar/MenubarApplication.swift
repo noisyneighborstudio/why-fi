@@ -11,9 +11,10 @@ final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
     private var updaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let updaterController = Self.makeUpdaterController()
+        let updateAvailability = UpdateAvailability()
+        let updaterController = Self.makeUpdaterController(userDriverDelegate: updateAvailability)
         self.updaterController = updaterController
-        let updateAvailability = UpdateAvailability(updater: updaterController?.updater)
+        updateAvailability.attach(updaterController?.updater)
 
         let statusController = StatusItemController(updateAvailability: updateAvailability)
         self.statusController = statusController
@@ -28,7 +29,7 @@ final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
         probes?.stop()
     }
 
-    private static func makeUpdaterController() -> SPUStandardUpdaterController? {
+    private static func makeUpdaterController(userDriverDelegate: SPUStandardUserDriverDelegate) -> SPUStandardUpdaterController? {
         let bundle = Bundle.main
         guard bundle.bundleURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame,
               let feedURL = bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
@@ -39,23 +40,27 @@ final class MenubarApplicationDelegate: NSObject, NSApplicationDelegate {
         return SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
-            userDriverDelegate: nil
+            userDriverDelegate: userDriverDelegate
         )
     }
 }
 
+/// Update state for the status item and popover, and Sparkle's gentle reminders.
+/// A menu bar app is never frontmost, so a scheduled update alert would open behind
+/// other windows. Instead, Sparkle holds it back and the status item shows a blue dot
+/// until the user opens the update from the popover.
 @MainActor
-final class UpdateAvailability: NSObject, ObservableObject {
-    let updater: SPUUpdater?
+final class UpdateAvailability: NSObject, ObservableObject, SPUStandardUserDriverDelegate {
+    private(set) var updater: SPUUpdater?
     @Published private(set) var canCheckForUpdates = false
+    /// Version of an update found by a scheduled check that the user hasn't looked at yet.
+    @Published private(set) var pendingVersion: String?
 
     private var observation: NSKeyValueObservation?
 
-    init(updater: SPUUpdater?) {
+    func attach(_ updater: SPUUpdater?) {
         self.updater = updater
-        self.canCheckForUpdates = updater?.canCheckForUpdates ?? false
-        super.init()
-
+        canCheckForUpdates = updater?.canCheckForUpdates ?? false
         observation = updater?.observe(\SPUUpdater.canCheckForUpdates, options: [.initial, .new]) { [weak self] updater, _ in
             Task { @MainActor [weak self] in
                 self?.refresh()
@@ -64,11 +69,48 @@ final class UpdateAvailability: NSObject, ObservableObject {
     }
 
     func checkForUpdates() {
+        // Brings a held-back update to the front instead of starting a new check.
         updater?.checkForUpdates()
     }
 
     private func refresh() {
         canCheckForUpdates = updater?.canCheckForUpdates ?? false
+    }
+
+    // MARK: SPUStandardUserDriverDelegate
+
+    nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    nonisolated func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem, andInImmediateFocus immediateFocus: Bool) -> Bool {
+        // Let Sparkle show it only when it can come up in front, such as right after launch.
+        immediateFocus
+    }
+
+    nonisolated func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem, state: SPUUserUpdateState) {
+        let version = update.displayVersionString
+        let userInitiated = state.userInitiated
+        MainActor.assumeIsolated {
+            if handleShowingUpdate {
+                // An accessory app's windows can't take focus, so become a regular app while the alert is up.
+                NSApp.setActivationPolicy(.regular)
+            }
+            if !userInitiated {
+                pendingVersion = version
+            }
+        }
+    }
+
+    nonisolated func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        MainActor.assumeIsolated {
+            pendingVersion = nil
+        }
+    }
+
+    nonisolated func standardUserDriverWillFinishUpdateSession() {
+        MainActor.assumeIsolated {
+            pendingVersion = nil
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 }
 
@@ -112,6 +154,7 @@ final class MonitorModel: ObservableObject {
     }
 }
 
+@MainActor
 final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
@@ -120,6 +163,7 @@ final class StatusItemController: NSObject {
     private var displayLink: CADisplayLink?
     private var lastFrame: CFTimeInterval?
     private let updateAvailability: UpdateAvailability
+    private var pendingUpdateObservation: AnyCancellable?
 
     init(updateAvailability: UpdateAvailability) {
         self.updateAvailability = updateAvailability
@@ -130,6 +174,11 @@ final class StatusItemController: NSObject {
         statusItem.button?.imagePosition = .imageOnly
         model.onChange = { [weak self] in self?.render() }
         render()
+        // @Published fires before the value changes, so redraw on the next turn of the run loop.
+        pendingUpdateObservation = updateAvailability.$pendingVersion
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.draw() }
 
         let hosting = NSHostingController(rootView: PopoverView(model: model, updateAvailability: updateAvailability))
         hosting.sizingOptions = .preferredContentSize
@@ -175,11 +224,13 @@ final class StatusItemController: NSObject {
     private func draw() {
         guard let button = statusItem.button else { return }
         let dark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let image = StatusRenderer.image(samples: model.samples, state: model.state, reveal: reveal.value, dark: dark)
+        let updateAvailable = updateAvailability.pendingVersion != nil
+        let image = StatusRenderer.image(samples: model.samples, state: model.state, reveal: reveal.value, dark: dark, updateAvailable: updateAvailable)
         // Set the length with the image so the item and its content move in the same frame.
         statusItem.length = image.size.width
         button.image = image
-        button.setAccessibilityLabel(StatusRenderer.accessibilityLabel(for: model.state))
+        let label = StatusRenderer.accessibilityLabel(for: model.state)
+        button.setAccessibilityLabel(updateAvailable ? String(localized: "\(label), update available") : label)
     }
 
     @objc private func togglePopover() {

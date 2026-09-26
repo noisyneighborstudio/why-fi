@@ -78,6 +78,21 @@ final class NetmonCoreTests: XCTestCase {
         }
     }
 
+    func testUpdateDotSitsAboveTheStateDotAtEveryReveal() throws {
+        let samples = Array(repeating: NetworkSample.ok(18), count: 30)
+        let state = MonitorState.evaluate(samples: samples, gatewayReachable: false)
+        for reveal in [0, 0.5, 1] as [CGFloat] {
+            let image = StatusRenderer.image(samples: samples, state: state, reveal: reveal, dark: false, updateAvailable: true)
+            let bitmap = try XCTUnwrap(image.representations.first as? NSBitmapImageRep)
+            // Glyph origin (6, 4) + (15.5, 2) = (21.5, 6)pt.
+            let dot = try color(bitmap, x: 21.5, y: 6)
+            XCTAssertGreaterThan(dot.alphaComponent, 0.9)
+            XCTAssertGreaterThan(dot.blueComponent, dot.redComponent + 0.5)
+        }
+        let plain = try render(samples, state: state, expanded: false)
+        XCTAssertLessThan(try color(plain, x: 21.5, y: 6).alphaComponent, 0.1)
+    }
+
     func testExpandedSparklineMarksLateBarsLossAndOutage() throws {
         var samples = Array(repeating: NetworkSample.ok(18), count: 24)
         samples += [.late(1_800), .lost, .ok(18), .lost, .lost, .lost]
