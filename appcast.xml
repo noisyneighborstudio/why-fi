@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<channel><title>WhyFi Updates</title><item>
+<title>WhyFi 1.0.0</title><pubDate>Sat, 26 Sep 2026 04:28:13 +0000</pubDate>
+<sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+<enclosure url="https://github.com/noisyneighborstudio/why-fi/releases/download/v1.0.0/WhyFi-1.0.0.zip" sparkle:version="1" sparkle:shortVersionString="1.0.0" length="1200381" type="application/octet-stream" sparkle:edSignature="2Pf7sZAr+yp4oW5s5qd1H9JI/kWGyu8NvyRxoFYaoeRQujjiZJpZqDi2yMgLwgNkYR9vh/ZoDFGjH3vrgnDxAQ=="/>
+</item></channel></rss>
